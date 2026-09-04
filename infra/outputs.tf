@@ -9,13 +9,18 @@ output "frontend_bucket" {
 }
 
 output "cloudfront_distribution_id" {
-  description = "Distribution to invalidate after a deploy."
-  value       = aws_cloudfront_distribution.frontend.id
+  description = "Distribution to invalidate after a deploy. Empty while CloudFront is held."
+  value       = var.enable_cloudfront ? aws_cloudfront_distribution.frontend[0].id : ""
 }
 
 output "cloudfront_domain_name" {
-  description = "CloudFront domain."
-  value       = aws_cloudfront_distribution.frontend.domain_name
+  description = "CloudFront domain. Empty while CloudFront is held."
+  value       = var.enable_cloudfront ? aws_cloudfront_distribution.frontend[0].domain_name : ""
+}
+
+output "api_url" {
+  description = "Lambda function URL. The browser uses this directly until CloudFront is on."
+  value       = trimsuffix(aws_lambda_function_url.api.function_url, "/")
 }
 
 output "dynamodb_table_name" {
@@ -29,14 +34,10 @@ output "desk_pin" {
   sensitive   = true
 }
 
-/**
- * Written to the frontend bucket by the deploy job as config.json. The API is
- * same-origin (/v1/…) via CloudFront, so apiBaseUrl is empty.
- */
 output "frontend_config" {
   description = "Runtime configuration document for the SPA."
   value = jsonencode({
     appName    = "ShelfKit"
-    apiBaseUrl = ""
+    apiBaseUrl = local.api_base_url
   })
 }

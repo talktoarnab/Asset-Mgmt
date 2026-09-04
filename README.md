@@ -10,23 +10,25 @@ without changing checkout.
 
 ## Architecture
 
-Four AWS services, plus the IAM role Lambda needs to run:
+While AWS Support verifies the account for CloudFront, the desk is served from S3
+(HTTP website) and the browser calls the Lambda function URL directly.
 
 ```
-Browser  ──CloudFront──┬── S3          (React desk app)
-                       └── Lambda URL  (API, /v1/*)
-                                        │
-                                        └── DynamoDB (single table)
+Browser  ── S3 website   (React desk app, HTTP)
+         ── Lambda URL   (API, /v1/*)
+                │
+                └── DynamoDB
 ```
+
+Set `enable_cloudfront = true` and re-apply after verification. That puts CloudFront
+in front of a private bucket and signs Lambda URL requests (AWS_IAM + OAC).
 
 | Layer | Service | Notes |
 | --- | --- | --- |
-| App | S3 (private) + CloudFront | SPA. `/v1/*` is routed to Lambda, everything else to S3 |
-| API | Lambda function URL | Node 22, arm64. CloudFront signs requests (OAC); the raw URL is not public |
+| App | S3 website (CloudFront held) | SPA. Error document is `index.html` for client routes |
+| API | Lambda function URL | Node 22, arm64. Public URL + desk PIN until CloudFront is on |
 | Data | DynamoDB | On-demand, PITR, one table per environment |
 | Auth | Desk PIN | HMAC session token in `Authorization: Bearer`. No Cognito |
-
-There is no API Gateway, Cognito, EventBridge, Secrets Manager, or messaging pipeline.
 
 ## Repository layout
 
@@ -54,7 +56,8 @@ Local auth is open (`AUTH_MODE=dev`). Any PIN on the sign-in screen works. The V
 ## Deploying to AWS
 
 Region default is `eu-north-1`. You need the AWS CLI v2, Terraform 1.10+, Node 22+, and IAM
-permission to create Lambda, DynamoDB, S3, CloudFront, and IAM roles.
+permission to create Lambda, DynamoDB, S3, and IAM roles. CloudFront is optional until AWS
+verifies the account.
 
 ### 1. Sign in
 
@@ -111,7 +114,9 @@ aws s3 sync ../frontend/dist "s3://$BUCKET" --delete \
   --cache-control 'public, max-age=31536000, immutable'
 aws s3 cp ../frontend/dist/index.html "s3://$BUCKET/index.html" --cache-control 'no-cache'
 aws s3 cp ../frontend/dist/config.json "s3://$BUCKET/config.json" --cache-control 'no-cache'
-aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*'
+if [ -n "$DIST" ]; then
+  aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*'
+fi
 
 terraform output -raw app_url
 ```
@@ -132,7 +137,7 @@ Two workflows in `.github/workflows/`. They authenticate to AWS with GitHub OIDC
 | Workflow | When | What it does |
 | --- | --- | --- |
 | **CI** | Pull requests and feature branches | Lint, test, `terraform validate`, then `terraform plan` |
-| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, build the SPA, sync to S3, invalidate CloudFront |
+| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, build the SPA, sync to S3 (invalidate CloudFront when it is enabled) |
 
 ```bash
 cd infra/bootstrap
@@ -150,6 +155,7 @@ Put these on the GitHub repo (**Settings → Secrets and variables → Actions**
 | `AWS_REGION` (variable) | `eu-north-1` |
 | `TF_ENVIRONMENT` (variable) | `dev` |
 | `TF_STATE_KEY` (variable) | `shelfkit/dev/terraform.tfstate` |
+| `ENABLE_CLOUDFRONT` (variable) | `false` until AWS verifies CloudFront |
 
 `AWS_ROLE_ARN` must be the **`shelfkit-github-actions`** role from this account, not a Lambda execution role. If assume-role still fails, the workflow now prints the token `sub` — for repos created after 15 Jul 2026 it looks like `repo:talktoarnab@OWNER_ID/Asset-Mgmt@REPO_ID:environment:dev`.
 

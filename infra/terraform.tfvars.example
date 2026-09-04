@@ -5,6 +5,10 @@ aws_region  = "eu-north-1"
 org_id   = "main"
 org_name = "My Library"
 
+# AWS has not verified this account for CloudFront yet. Set true after Support
+# clears CreateDistributionWithTags AccessDenied, then re-apply.
+enable_cloudfront = false
+
 # Leave empty to generate a 6-digit PIN (terraform output -raw desk_pin).
 # desk_pin = "246810"
 

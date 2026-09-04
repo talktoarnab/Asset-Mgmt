@@ -11,9 +11,9 @@ resource "aws_s3_bucket" "frontend" {
 resource "aws_s3_bucket_public_access_block" "frontend" {
   bucket                  = aws_s3_bucket.frontend.id
   block_public_acls       = true
-  block_public_policy     = true
+  block_public_policy     = var.enable_cloudfront
   ignore_public_acls      = true
-  restrict_public_buckets = true
+  restrict_public_buckets = var.enable_cloudfront
 }
 
 resource "aws_s3_bucket_ownership_controls" "frontend" {
@@ -62,21 +62,53 @@ resource "aws_s3_bucket_lifecycle_configuration" "frontend" {
   }
 }
 
+# SPA fallback while CloudFront is off. Error document returns index.html so
+# client-side routes such as /assets/abc still load the app.
+resource "aws_s3_bucket_website_configuration" "frontend" {
+  count  = var.enable_cloudfront ? 0 : 1
+  bucket = aws_s3_bucket.frontend.id
+
+  index_document {
+    suffix = "index.html"
+  }
+
+  error_document {
+    key = "index.html"
+  }
+}
+
 data "aws_iam_policy_document" "frontend_bucket" {
-  statement {
-    sid       = "AllowCloudFrontRead"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.frontend.arn}/*"]
+  dynamic "statement" {
+    for_each = var.enable_cloudfront ? [1] : []
+    content {
+      sid       = "AllowCloudFrontRead"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.frontend.arn}/*"]
 
-    principals {
-      type        = "Service"
-      identifiers = ["cloudfront.amazonaws.com"]
+      principals {
+        type        = "Service"
+        identifiers = ["cloudfront.amazonaws.com"]
+      }
+
+      condition {
+        test     = "StringEquals"
+        variable = "AWS:SourceArn"
+        values   = [aws_cloudfront_distribution.frontend[0].arn]
+      }
     }
+  }
 
-    condition {
-      test     = "StringEquals"
-      variable = "AWS:SourceArn"
-      values   = [aws_cloudfront_distribution.frontend.arn]
+  dynamic "statement" {
+    for_each = var.enable_cloudfront ? [] : [1]
+    content {
+      sid       = "AllowPublicRead"
+      actions   = ["s3:GetObject"]
+      resources = ["${aws_s3_bucket.frontend.arn}/*"]
+
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
     }
   }
 }
@@ -88,8 +120,11 @@ resource "aws_s3_bucket_policy" "frontend" {
 }
 
 # ----------------------------------------------------------- distribution ---
+# All of these are skipped until enable_cloudfront = true. Creating any of them
+# on an unverified account returns AccessDenied from CloudFront.
 
 resource "aws_cloudfront_origin_access_control" "frontend" {
+  count                             = var.enable_cloudfront ? 1 : 0
   name                              = "${local.name_prefix}-s3-oac"
   description                       = "Signed access from CloudFront to the private frontend bucket"
   origin_access_control_origin_type = "s3"
@@ -98,6 +133,7 @@ resource "aws_cloudfront_origin_access_control" "frontend" {
 }
 
 resource "aws_cloudfront_origin_access_control" "api" {
+  count                             = var.enable_cloudfront ? 1 : 0
   name                              = "${local.name_prefix}-lambda-oac"
   description                       = "Signed access from CloudFront to the API Lambda function URL"
   origin_access_control_origin_type = "lambda"
@@ -106,7 +142,8 @@ resource "aws_cloudfront_origin_access_control" "api" {
 }
 
 resource "aws_cloudfront_response_headers_policy" "frontend" {
-  name = "${local.name_prefix}-security-headers"
+  count = var.enable_cloudfront ? 1 : 0
+  name  = "${local.name_prefix}-security-headers"
 
   security_headers_config {
     content_type_options {
@@ -141,6 +178,7 @@ resource "aws_cloudfront_response_headers_policy" "frontend" {
 }
 
 resource "aws_cloudfront_cache_policy" "frontend" {
+  count       = var.enable_cloudfront ? 1 : 0
   name        = "${local.name_prefix}-static"
   default_ttl = 86400
   max_ttl     = 31536000
@@ -165,19 +203,17 @@ resource "aws_cloudfront_cache_policy" "frontend" {
 }
 
 data "aws_cloudfront_cache_policy" "caching_disabled" {
-  name = "Managed-CachingDisabled"
+  count = var.enable_cloudfront ? 1 : 0
+  name  = "Managed-CachingDisabled"
 }
 
-# Host must be the function-URL hostname, not the CloudFront domain, otherwise
-# Lambda rejects the request. This managed policy forwards everything else.
 data "aws_cloudfront_origin_request_policy" "all_viewer_except_host" {
-  name = "Managed-AllViewerExceptHostHeader"
+  count = var.enable_cloudfront ? 1 : 0
+  name  = "Managed-AllViewerExceptHostHeader"
 }
 
-# Deep links such as /assets/abc are not objects in the bucket. Rewrite them to
-# the SPA shell here instead of using distribution-wide 403/404 custom errors,
-# which would also rewrite API 404s from the Lambda origin.
 resource "aws_cloudfront_function" "spa" {
+  count   = var.enable_cloudfront ? 1 : 0
   name    = "${local.name_prefix}-spa-rewrite"
   runtime = "cloudfront-js-2.0"
   comment = "Client-side routes rewrite to /index.html"
@@ -200,6 +236,7 @@ locals {
 }
 
 resource "aws_cloudfront_distribution" "frontend" {
+  count               = var.enable_cloudfront ? 1 : 0
   enabled             = true
   is_ipv6_enabled     = true
   comment             = "${local.name_prefix} desk app"
@@ -209,13 +246,13 @@ resource "aws_cloudfront_distribution" "frontend" {
   origin {
     domain_name              = aws_s3_bucket.frontend.bucket_regional_domain_name
     origin_id                = "frontend-bucket"
-    origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
+    origin_access_control_id = aws_cloudfront_origin_access_control.frontend[0].id
   }
 
   origin {
     domain_name              = local.api_origin_domain
     origin_id                = "api-lambda"
-    origin_access_control_id = aws_cloudfront_origin_access_control.api.id
+    origin_access_control_id = aws_cloudfront_origin_access_control.api[0].id
 
     custom_origin_config {
       http_port              = 80
@@ -231,16 +268,15 @@ resource "aws_cloudfront_distribution" "frontend" {
     allowed_methods            = ["GET", "HEAD", "OPTIONS"]
     cached_methods             = ["GET", "HEAD"]
     compress                   = true
-    cache_policy_id            = aws_cloudfront_cache_policy.frontend.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend.id
+    cache_policy_id            = aws_cloudfront_cache_policy.frontend[0].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend[0].id
 
     function_association {
       event_type   = "viewer-request"
-      function_arn = aws_cloudfront_function.spa.arn
+      function_arn = aws_cloudfront_function.spa[0].arn
     }
   }
 
-  # config.json is rewritten on every deploy, so it must never be served stale.
   ordered_cache_behavior {
     path_pattern               = "/config.json"
     target_origin_id           = "frontend-bucket"
@@ -248,11 +284,10 @@ resource "aws_cloudfront_distribution" "frontend" {
     allowed_methods            = ["GET", "HEAD"]
     cached_methods             = ["GET", "HEAD"]
     compress                   = true
-    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend.id
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled[0].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend[0].id
   }
 
-  # Same origin as the SPA, so the browser does not need CORS.
   ordered_cache_behavior {
     path_pattern               = "/v1/*"
     target_origin_id           = "api-lambda"
@@ -260,9 +295,9 @@ resource "aws_cloudfront_distribution" "frontend" {
     allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods             = ["GET", "HEAD"]
     compress                   = true
-    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
-    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend.id
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled[0].id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host[0].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.frontend[0].id
   }
 
   restrictions {

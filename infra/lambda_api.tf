@@ -84,18 +84,29 @@ resource "aws_lambda_function" "api" {
   depends_on = [aws_iam_role_policy_attachment.api_logs]
 }
 
-# CloudFront is the only public entry. AWS_IAM + origin access control means the
-# raw function URL cannot be called even if someone discovers it.
+# Without CloudFront the browser calls this URL directly (PIN auth still applies).
+# With CloudFront, AWS_IAM + OAC keeps the raw URL unusable.
 resource "aws_lambda_function_url" "api" {
   function_name      = aws_lambda_function.api.function_name
-  authorization_type = "AWS_IAM"
+  authorization_type = var.enable_cloudfront ? "AWS_IAM" : "NONE"
+
+  dynamic "cors" {
+    for_each = var.enable_cloudfront ? [] : [1]
+    content {
+      allow_origins = ["*"]
+      allow_methods = ["*"]
+      allow_headers = ["authorization", "content-type"]
+      max_age       = 86400
+    }
+  }
 }
 
 resource "aws_lambda_permission" "cloudfront" {
+  count                  = var.enable_cloudfront ? 1 : 0
   statement_id           = "AllowCloudFrontInvokeUrl"
   action                 = "lambda:InvokeFunctionUrl"
   function_name          = aws_lambda_function.api.function_name
   principal              = "cloudfront.amazonaws.com"
-  source_arn             = aws_cloudfront_distribution.frontend.arn
+  source_arn             = aws_cloudfront_distribution.frontend[0].arn
   function_url_auth_type = "AWS_IAM"
 }

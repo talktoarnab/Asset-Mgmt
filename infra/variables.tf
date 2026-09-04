@@ -26,6 +26,12 @@ variable "aws_region" {
   default     = "eu-north-1"
 }
 
+variable "enable_cloudfront" {
+  description = "Create the CloudFront distribution. Leave false until AWS has verified the account for CloudFront."
+  type        = bool
+  default     = false
+}
+
 variable "cloudfront_price_class" {
   description = "CloudFront price class. PriceClass_200 covers Asia and Europe without paying for every edge."
   type        = string

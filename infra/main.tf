@@ -15,7 +15,12 @@ locals {
   )
 
   account_id = data.aws_caller_identity.current.account_id
-  app_url    = "https://${aws_cloudfront_distribution.frontend.domain_name}"
+
+  # S3 website is HTTP-only. Switch to CloudFront (HTTPS, private bucket) once
+  # AWS Support has verified the account.
+  app_url = var.enable_cloudfront ? "https://${aws_cloudfront_distribution.frontend[0].domain_name}" : "http://${aws_s3_bucket_website_configuration.frontend[0].website_endpoint}"
+
+  api_base_url = var.enable_cloudfront ? "" : trimsuffix(aws_lambda_function_url.api.function_url, "/")
 
   backend_artifacts = "${path.module}/../backend/artifacts"
 

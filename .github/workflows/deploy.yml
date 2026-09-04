@@ -126,6 +126,7 @@ jobs:
         env:
           TF_VAR_environment: ${{ github.event.inputs.environment || vars.TF_ENVIRONMENT || 'dev' }}
           TF_VAR_aws_region: ${{ vars.AWS_REGION || 'eu-north-1' }}
+          TF_VAR_enable_cloudfront: ${{ vars.ENABLE_CLOUDFRONT || 'false' }}
 
       - name: Read infrastructure outputs
         id: tf
@@ -166,6 +167,7 @@ jobs:
             --content-type "application/json"
 
       - name: Invalidate the CDN cache
+        if: steps.tf.outputs.distribution != ''
         run: |
           ID=$(aws cloudfront create-invalidation \
             --distribution-id "${{ steps.tf.outputs.distribution }}" \
