@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+# A new push supersedes an in-flight run for the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  NODE_VERSION: '24'
+  TERRAFORM_VERSION: '1.12.2'
+
+jobs:
+  backend:
+    name: Backend — lint, typecheck, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Lint
+        working-directory: backend
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: backend
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: backend
+        run: npm test
+
+      - name: Bundle Lambda artifacts
+        working-directory: backend
+        run: npm run build
+
+  frontend:
+    name: Frontend — lint and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Typecheck and build
+        working-directory: frontend
+        run: npm run build
+
+  terraform-validate:
+    name: Terraform — format, validate, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        working-directory: infra
+        run: terraform fmt -check -recursive -diff
+
+      # No backend, no credentials: this only proves the configuration is
+      # internally consistent, which is all a fork's pull request can prove.
+      - name: Initialise without backend
+        working-directory: infra
+        run: |
+          mkdir -p ../backend/artifacts/api
+          test -f ../backend/artifacts/api/index.mjs || echo 'export const handler = async () => ({})' > ../backend/artifacts/api/index.mjs
+          terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: infra
+        run: terraform validate -no-color
+
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+
+      - name: Lint
+        working-directory: infra
+        run: |
+          tflint --init
+          tflint --format compact
+
+  terraform-plan:
+    name: Terraform — plan
+    runs-on: ubuntu-latest
+    needs: [backend, terraform-validate]
+    # Skip fork PRs which cannot use secrets. Missing AWS_ROLE_ARN is caught
+    # below with a readable error instead of the SDK's "no providers" message.
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require AWS OIDC secrets
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+        run: |
+          missing=0
+          if [ -z "$AWS_ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN is empty. Add it under Settings → Secrets and variables → Actions (and on the 'dev' Environment). Value: terraform -chdir=infra/bootstrap output -raw github_actions_role_arn"
+            missing=1
+          fi
+          if [ -z "$TF_STATE_BUCKET" ]; then
+            echo "::error::Secret TF_STATE_BUCKET is empty."
+            missing=1
+          fi
+          exit "$missing"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # The Lambda zips are hashed into the plan, so they must be built with the
+      # same command the deploy uses or the plan would show phantom changes.
+      - name: Build Lambda artifacts
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Show GitHub OIDC claims
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+          req = urllib.request.Request(
+              url,
+              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          token = json.load(urllib.request.urlopen(req))["value"]
+          payload = token.split(".")[1]
+          payload += "=" * ((4 - len(payload) % 4) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          for key in ("iss", "aud", "sub", "repository", "repository_id", "repository_owner", "repository_owner_id"):
+              print(f"{key}: {claims.get(key)}")
+          PY
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
+          audience: sts.amazonaws.com
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Initialise
+        working-directory: infra
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY || 'shelfkit/dev/terraform.tfstate' }}" \
+            -backend-config="region=${{ vars.AWS_REGION || 'eu-north-1' }}"
+
+      - name: Plan
+        id: plan
+        working-directory: infra
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m -out=tfplan | tee plan.txt
+          echo "summary=$(grep -E '^Plan:|No changes' plan.txt | tail -1)" >> "$GITHUB_OUTPUT"
+        env:
+          TF_VAR_environment: ${{ vars.TF_ENVIRONMENT || 'dev' }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION || 'eu-north-1' }}
+
+      - name: Comment the plan on the pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('infra/plan.txt', 'utf8');
+            // Keep well inside GitHub's 65 536 character comment limit.
+            const trimmed = plan.length > 60000 ? `${plan.slice(0, 60000)}\n... truncated ...` : plan;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Terraform plan\n\`${{ steps.plan.outputs.summary }}\`\n\n<details><summary>Full plan</summary>\n\n\`\`\`terraform\n${trimmed}\n\`\`\`\n\n</details>`,
+            });

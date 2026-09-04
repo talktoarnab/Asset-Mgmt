@@ -1,0 +1,196 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        type: choice
+        options: [dev, staging, prod]
+        default: dev
+
+# Deploys are serialised: two applies against one state file would deadlock on
+# the lock table and leave a half-published frontend.
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NODE_VERSION: '24'
+  TERRAFORM_VERSION: '1.12.2'
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Backend checks
+        working-directory: backend
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test
+
+  deploy:
+    name: Provision and publish
+    runs-on: ubuntu-latest
+    needs: [verify]
+    environment: ${{ github.event.inputs.environment || vars.TF_ENVIRONMENT || 'dev' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require AWS OIDC secrets
+        env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+        run: |
+          missing=0
+          if [ -z "$AWS_ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN is empty. Add it under Settings → Secrets and variables → Actions (repository secrets, not variables) and on the GitHub Environment this job uses. Value: terraform -chdir=infra/bootstrap output -raw github_actions_role_arn"
+            missing=1
+          fi
+          if [ -z "$TF_STATE_BUCKET" ]; then
+            echo "::error::Secret TF_STATE_BUCKET is empty."
+            missing=1
+          fi
+          exit "$missing"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build Lambda artifacts
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Show GitHub OIDC claims
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, urllib.request
+          url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=sts.amazonaws.com"
+          req = urllib.request.Request(
+              url,
+              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          token = json.load(urllib.request.urlopen(req))["value"]
+          payload = token.split(".")[1]
+          payload += "=" * ((4 - len(payload) % 4) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          for key in ("iss", "aud", "sub", "repository", "repository_id", "repository_owner", "repository_owner_id"):
+              print(f"{key}: {claims.get(key)}")
+          PY
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'eu-north-1' }}
+          audience: sts.amazonaws.com
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Initialise
+        working-directory: infra
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY || 'shelfkit/dev/terraform.tfstate' }}" \
+            -backend-config="region=${{ vars.AWS_REGION || 'eu-north-1' }}"
+
+      - name: Apply
+        working-directory: infra
+        run: terraform apply -auto-approve -input=false -lock-timeout=10m
+        env:
+          TF_VAR_environment: ${{ github.event.inputs.environment || vars.TF_ENVIRONMENT || 'dev' }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION || 'eu-north-1' }}
+
+      - name: Read infrastructure outputs
+        id: tf
+        working-directory: infra
+        run: |
+          {
+            echo "bucket=$(terraform output -raw frontend_bucket)"
+            echo "distribution=$(terraform output -raw cloudfront_distribution_id)"
+            echo "app_url=$(terraform output -raw app_url)"
+          } >> "$GITHUB_OUTPUT"
+          terraform output -raw frontend_config > ../frontend/config.json
+
+      - name: Build the frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # Hashed assets are immutable and cached for a year. The shell and its
+      # configuration are re-fetched every time so a deploy is visible at once.
+      - name: Publish immutable assets
+        run: |
+          aws s3 sync frontend/dist "s3://${{ steps.tf.outputs.bucket }}" \
+            --delete \
+            --exclude "index.html" \
+            --exclude "config.json" \
+            --exclude "*.map" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Publish the app shell and runtime configuration
+        run: |
+          cp frontend/config.json frontend/dist/config.json
+          aws s3 cp frontend/dist/index.html "s3://${{ steps.tf.outputs.bucket }}/index.html" \
+            --cache-control "no-cache, must-revalidate" \
+            --content-type "text/html; charset=utf-8"
+          aws s3 cp frontend/dist/config.json "s3://${{ steps.tf.outputs.bucket }}/config.json" \
+            --cache-control "no-cache, must-revalidate" \
+            --content-type "application/json"
+
+      - name: Invalidate the CDN cache
+        run: |
+          ID=$(aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.tf.outputs.distribution }}" \
+            --paths "/*" \
+            --query 'Invalidation.Id' --output text)
+          echo "Waiting for invalidation $ID to complete…"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${{ steps.tf.outputs.distribution }}" \
+            --id "$ID"
+
+      # Fails the deploy if the published app is not actually reachable.
+      - name: Smoke test
+        run: |
+          URL="${{ steps.tf.outputs.app_url }}"
+          for path in "/" "/config.json"; do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${URL}${path}")
+            echo "GET ${path} -> ${CODE}"
+            [ "$CODE" = "200" ] || exit 1
+          done
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Deployed"
+            echo ""
+            echo "- App: ${{ steps.tf.outputs.app_url }}"
+            echo "- Commit: \`${GITHUB_SHA::7}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

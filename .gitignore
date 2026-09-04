@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+backend/artifacts/
+
+# Terraform
+# .terraform.lock.hcl is deliberately NOT ignored: committing it pins provider
+# versions so CI resolves exactly what was reviewed locally.
+.terraform/
+infra/.build/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.auto.tfvars
+terraform.tfvars
+
+# Written by the deploy job from Terraform outputs
+frontend/config.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test output
+coverage/

@@ -1,0 +1,13 @@
+project     = "shelfkit"
+environment = "dev"
+aws_region  = "eu-north-1"
+
+org_id   = "main"
+org_name = "My Library"
+
+# Leave empty to generate a 6-digit PIN (terraform output -raw desk_pin).
+# desk_pin = "246810"
+
+# Recommended for production.
+# point_in_time_recovery = true
+# deletion_protection    = true

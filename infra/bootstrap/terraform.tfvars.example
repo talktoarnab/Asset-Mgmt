@@ -1,0 +1,10 @@
+project    = "shelfkit"
+aws_region = "eu-north-1"
+
+# Repository whose GitHub Actions jobs may assume the deploy role.
+github_org  = "talktoarnab"
+github_repo = "Asset-Mgmt"
+
+# Set false if this AWS account already has
+# token.actions.githubusercontent.com as an OIDC provider.
+create_github_oidc_provider = true
