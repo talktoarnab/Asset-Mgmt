@@ -24,6 +24,7 @@ locals {
     "arn:aws:iam::aws:policy/AmazonS3FullAccess",
     "arn:aws:iam::aws:policy/CloudFrontFullAccess",
     "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess",
+    "arn:aws:iam::aws:policy/AmazonAPIGatewayAdministrator",
   ]
 }
 

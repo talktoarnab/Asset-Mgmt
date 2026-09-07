@@ -9,17 +9,17 @@ output "frontend_bucket" {
 }
 
 output "cloudfront_distribution_id" {
-  description = "Distribution to invalidate after a deploy. Empty while CloudFront is held."
+  description = "Distribution to invalidate after a deploy. Empty if CloudFront is off."
   value       = var.enable_cloudfront ? aws_cloudfront_distribution.frontend[0].id : ""
 }
 
 output "cloudfront_domain_name" {
-  description = "CloudFront domain. Empty while CloudFront is held."
+  description = "CloudFront domain. Empty if CloudFront is off."
   value       = var.enable_cloudfront ? aws_cloudfront_distribution.frontend[0].domain_name : ""
 }
 
 output "api_url" {
-  description = "API Gateway URL. The browser uses this directly until CloudFront is on."
+  description = "API Gateway URL. Unused by the browser when CloudFront is on (same-origin /v1)."
   value       = aws_apigatewayv2_api.http.api_endpoint
 }
 

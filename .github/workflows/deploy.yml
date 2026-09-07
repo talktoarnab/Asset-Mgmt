@@ -118,7 +118,7 @@ jobs:
         env:
           TF_VAR_environment: ${{ github.event.inputs.environment || vars.TF_ENVIRONMENT || 'dev' }}
           TF_VAR_aws_region: ${{ vars.AWS_REGION || 'eu-north-1' }}
-          TF_VAR_enable_cloudfront: ${{ vars.ENABLE_CLOUDFRONT || 'false' }}
+          TF_VAR_enable_cloudfront: ${{ vars.ENABLE_CLOUDFRONT || 'true' }}
 
       - name: Read infrastructure outputs
         id: tf

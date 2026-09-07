@@ -18,18 +18,16 @@ Browser  ── CloudFront
                           └── DynamoDB
 ```
 
-While AWS Support verifies the account for CloudFront, the desk is served from the S3 website
-(HTTP) and the browser calls API Gateway directly.
+CloudFront serves the desk over HTTPS from a private S3 bucket and proxies `/v1` to API Gateway
+so the browser stays same-origin. Set `enable_cloudfront = false` only if you need the S3 website
+fallback.
 
 | Layer | Service | Notes |
 | --- | --- | --- |
-| App | S3 (+ CloudFront when enabled) | Static HTML, CSS, JS. No build step |
-| API | API Gateway HTTP API → Lambda | Python 3.13, arm64. Desk PIN in `Authorization: Bearer` |
+| App | CloudFront → S3 | Static HTML, CSS, JS. No build step |
+| API | CloudFront `/v1` → API Gateway HTTP API → Lambda | Python 3.13, arm64. Desk PIN in `Authorization: Bearer` |
 | Data | DynamoDB | On-demand, PITR, one table per environment |
 | Auth | Desk PIN | HMAC session token. No Cognito |
-
-Set `enable_cloudfront = true` and re-apply after verification. That puts CloudFront in front of
-a private bucket and same-origin `/v1` to API Gateway.
 
 ## Repository layout
 
@@ -58,8 +56,7 @@ proxies `/v1` to the local API, same as CloudFront does in AWS.
 ## Deploying to AWS
 
 Region default is `eu-north-1`. You need the AWS CLI v2, Terraform 1.10+, Python 3.13+, and IAM
-permission to create Lambda, API Gateway, DynamoDB, S3, and IAM roles. CloudFront is optional
-until AWS verifies the account.
+permission to create CloudFront, Lambda, API Gateway, DynamoDB, S3, and IAM roles.
 
 ### 1. Sign in
 
@@ -141,7 +138,7 @@ Two workflows in `.github/workflows/`. They authenticate to AWS with GitHub OIDC
 | Workflow | When | What it does |
 | --- | --- | --- |
 | **CI** | Pull requests and feature branches | Test, `terraform validate`, then `terraform plan` |
-| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, sync static files to S3 (invalidate CloudFront when it is enabled) |
+| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, sync static files to S3, invalidate CloudFront |
 
 ```bash
 cd infra/bootstrap
@@ -159,7 +156,7 @@ Put these on the GitHub repo (**Settings → Secrets and variables → Actions**
 | `AWS_REGION` (variable) | `eu-north-1` |
 | `TF_ENVIRONMENT` (variable) | `dev` |
 | `TF_STATE_KEY` (variable) | `shelfkit/dev/terraform.tfstate` |
-| `ENABLE_CLOUDFRONT` (variable) | `false` until AWS verifies CloudFront |
+| `ENABLE_CLOUDFRONT` (variable) | `true` |
 
 `AWS_ROLE_ARN` must be the **`shelfkit-github-actions`** role from this account, not a Lambda execution role. If assume-role still fails, the workflow now prints the token `sub` — for repos created after 15 Jul 2026 it looks like `repo:talktoarnab@OWNER_ID/Asset-Mgmt@REPO_ID:environment:dev`.
 

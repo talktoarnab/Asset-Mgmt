@@ -27,9 +27,9 @@ variable "aws_region" {
 }
 
 variable "enable_cloudfront" {
-  description = "Create the CloudFront distribution. Leave false until AWS has verified the account for CloudFront."
+  description = "Create the CloudFront distribution in front of S3 and API Gateway."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "cloudfront_price_class" {

@@ -120,8 +120,6 @@ resource "aws_s3_bucket_policy" "frontend" {
 }
 
 # ----------------------------------------------------------- distribution ---
-# All of these are skipped until enable_cloudfront = true. Creating any of them
-# on an unverified account returns AccessDenied from CloudFront.
 
 resource "aws_cloudfront_origin_access_control" "frontend" {
   count                             = var.enable_cloudfront ? 1 : 0

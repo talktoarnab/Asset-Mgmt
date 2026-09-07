@@ -37,6 +37,7 @@ echo "Writing repository variables…"
 gh variable set AWS_REGION --repo "$REPO" --body "$REGION"
 gh variable set TF_ENVIRONMENT --repo "$REPO" --body "$ENV_NAME"
 gh variable set TF_STATE_KEY --repo "$REPO" --body "${PROJECT}/${ENV_NAME}/terraform.tfstate"
+gh variable set ENABLE_CLOUDFRONT --repo "$REPO" --body "true"
 
 echo
 echo "Done. Open https://github.com/${REPO}/settings/environments"
