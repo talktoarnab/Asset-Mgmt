@@ -19,8 +19,8 @@ output "cloudfront_domain_name" {
 }
 
 output "api_url" {
-  description = "Lambda function URL. The browser uses this directly until CloudFront is on."
-  value       = trimsuffix(aws_lambda_function_url.api.function_url, "/")
+  description = "API Gateway URL. The browser uses this directly until CloudFront is on."
+  value       = aws_apigatewayv2_api.http.api_endpoint
 }
 
 output "dynamodb_table_name" {
@@ -35,7 +35,7 @@ output "desk_pin" {
 }
 
 output "frontend_config" {
-  description = "Runtime configuration document for the SPA."
+  description = "Runtime configuration document for the desk app."
   value = jsonencode({
     appName    = "ShelfKit"
     apiBaseUrl = local.api_base_url

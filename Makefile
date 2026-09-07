@@ -1,48 +1,46 @@
 .PHONY: help install dev seed test lint build check tf-validate clean
 
 help:
-	@echo "install       Install backend and frontend dependencies"
+	@echo "install       Install backend test dependencies"
 	@echo "seed          Create the local DynamoDB table and load demo data"
-	@echo "dev           Run the API (:4000) and the app (:5173) together"
+	@echo "dev           Run the API (:4000) and the desk app (:5173) together"
 	@echo "test          Run the backend unit tests"
-	@echo "lint          Lint backend, frontend and terraform"
-	@echo "build         Bundle the Lambda artifacts and the frontend"
+	@echo "lint          Compile-check Python and check terraform formatting"
+	@echo "build         Copy the Lambda source into artifacts/api"
 	@echo "check         Everything CI runs, locally"
-	@echo "clean         Remove build output and dependencies"
+	@echo "clean         Remove build output"
 
 install:
-	cd backend && npm install
-	cd frontend && npm install
+	python3 -m pip install -r backend/requirements-dev.txt
 
 seed:
-	cd backend && npm run seed
+	python3 backend/src/local/setup.py
 
 dev:
 	@echo "API on :4000, app on :5173 — Ctrl-C stops both"
 	@trap 'kill 0' INT TERM; \
-	(cd backend && npm run dev) & \
-	(cd frontend && npm run dev) & \
+	python3 backend/src/local/server.py & \
+	(cd frontend && node serve.mjs) & \
 	wait
 
 test:
-	cd backend && npm test
+	cd backend && python3 -m pytest
 
 lint:
-	cd backend && npm run lint
-	cd frontend && npm run lint
+	python3 -m compileall -q backend/src
 	cd infra && terraform fmt -check -recursive
 
 build:
-	cd backend && npm run build
-	cd frontend && npm run build
+	bash backend/scripts/build.sh
 
 # Mirrors the CI workflow so a failure is caught before pushing.
 check: lint test build tf-validate
 
 tf-validate:
 	mkdir -p backend/artifacts/api
-	test -f backend/artifacts/api/index.mjs || echo 'export const handler = async () => ({})' > backend/artifacts/api/index.mjs
+	test -f backend/artifacts/api/handler.py || printf '%s\n' 'def handler(event, context=None):' '    return {"statusCode": 200, "body": "{}"}' > backend/artifacts/api/handler.py
 	cd infra && terraform init -backend=false -input=false >/dev/null && terraform validate
 
 clean:
-	rm -rf backend/node_modules backend/artifacts frontend/node_modules frontend/dist infra/.build
+	rm -rf backend/artifacts backend/.pytest_cache infra/.build
+	find backend -type d -name '__pycache__' -exec rm -rf {} +

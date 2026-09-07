@@ -1,4 +1,4 @@
-# Built by `npm --prefix backend run build` before terraform runs; the CI
+# Built by `bash backend/scripts/build.sh` before terraform runs; the CI
 # workflow does this in every job so plan and apply see identical hashes.
 data "archive_file" "api" {
   type        = "zip"
@@ -64,8 +64,8 @@ resource "aws_lambda_function" "api" {
   role             = aws_iam_role.api.arn
   filename         = data.archive_file.api.output_path
   source_code_hash = data.archive_file.api.output_base64sha256
-  handler          = "index.handler"
-  runtime          = "nodejs22.x"
+  handler          = "handler.handler"
+  runtime          = "python3.13"
   architectures    = ["arm64"]
   memory_size      = var.lambda_memory_mb
   timeout          = var.lambda_timeout_seconds
@@ -84,29 +84,43 @@ resource "aws_lambda_function" "api" {
   depends_on = [aws_iam_role_policy_attachment.api_logs]
 }
 
-# Without CloudFront the browser calls this URL directly (PIN auth still applies).
-# With CloudFront, AWS_IAM + OAC keeps the raw URL unusable.
-resource "aws_lambda_function_url" "api" {
-  function_name      = aws_lambda_function.api.function_name
-  authorization_type = var.enable_cloudfront ? "AWS_IAM" : "NONE"
+# Lambda is invoked only through API Gateway (HTTP API, payload 2.0).
+resource "aws_apigatewayv2_api" "http" {
+  name          = "${local.name_prefix}-http"
+  protocol_type = "HTTP"
+  description   = "Desk API in front of the Lambda"
 
-  dynamic "cors" {
-    for_each = var.enable_cloudfront ? [] : [1]
-    content {
-      allow_origins = ["*"]
-      allow_methods = ["*"]
-      allow_headers = ["authorization", "content-type"]
-      max_age       = 86400
-    }
+  cors_configuration {
+    allow_origins = ["*"]
+    allow_methods = ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"]
+    allow_headers = ["authorization", "content-type"]
+    max_age       = 86400
   }
 }
 
-resource "aws_lambda_permission" "cloudfront" {
-  count                  = var.enable_cloudfront ? 1 : 0
-  statement_id           = "AllowCloudFrontInvokeUrl"
-  action                 = "lambda:InvokeFunctionUrl"
-  function_name          = aws_lambda_function.api.function_name
-  principal              = "cloudfront.amazonaws.com"
-  source_arn             = aws_cloudfront_distribution.frontend[0].arn
-  function_url_auth_type = "AWS_IAM"
+resource "aws_apigatewayv2_integration" "lambda" {
+  api_id                 = aws_apigatewayv2_api.http.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.api.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "default" {
+  api_id    = aws_apigatewayv2_api.http.id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.http.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_lambda_permission" "apigw" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.http.execution_arn}/*/*"
 }

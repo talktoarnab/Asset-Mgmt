@@ -41,3 +41,7 @@ frontend/config.json
 
 # Test output
 coverage/
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/

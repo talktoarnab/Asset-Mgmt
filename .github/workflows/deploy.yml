@@ -22,7 +22,7 @@ permissions:
   id-token: write
 
 env:
-  NODE_VERSION: '24'
+  PYTHON_VERSION: '3.13'
   TERRAFORM_VERSION: '1.12.2'
 
 jobs:
@@ -32,19 +32,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-python@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
 
       - name: Backend checks
         working-directory: backend
         run: |
-          npm ci
-          npm run lint
-          npm run typecheck
-          npm test
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q src
+          python -m pytest
 
   deploy:
     name: Provision and publish
@@ -73,15 +72,8 @@ jobs:
           fi
           exit "$missing"
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
       - name: Build Lambda artifacts
-        working-directory: backend
-        run: |
-          npm ci
-          npm run build
+        run: bash backend/scripts/build.sh
 
       - name: Show GitHub OIDC claims
         run: |
@@ -139,30 +131,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           terraform output -raw frontend_config > ../frontend/config.json
 
-      - name: Build the frontend
-        working-directory: frontend
+      - name: Publish the desk app
         run: |
-          npm ci
-          npm run build
-
-      # Hashed assets are immutable and cached for a year. The shell and its
-      # configuration are re-fetched every time so a deploy is visible at once.
-      - name: Publish immutable assets
-        run: |
-          aws s3 sync frontend/dist "s3://${{ steps.tf.outputs.bucket }}" \
+          aws s3 sync frontend "s3://${{ steps.tf.outputs.bucket }}" \
             --delete \
+            --exclude "serve.mjs" \
             --exclude "index.html" \
             --exclude "config.json" \
-            --exclude "*.map" \
-            --cache-control "public, max-age=31536000, immutable"
-
-      - name: Publish the app shell and runtime configuration
-        run: |
-          cp frontend/config.json frontend/dist/config.json
-          aws s3 cp frontend/dist/index.html "s3://${{ steps.tf.outputs.bucket }}/index.html" \
+            --exclude ".DS_Store" \
+            --exclude "node_modules/*" \
+            --exclude "src/*" \
+            --exclude "dist/*" \
+            --cache-control "no-cache, must-revalidate"
+          aws s3 cp frontend/index.html "s3://${{ steps.tf.outputs.bucket }}/index.html" \
             --cache-control "no-cache, must-revalidate" \
             --content-type "text/html; charset=utf-8"
-          aws s3 cp frontend/dist/config.json "s3://${{ steps.tf.outputs.bucket }}/config.json" \
+          aws s3 cp frontend/config.json "s3://${{ steps.tf.outputs.bucket }}/config.json" \
             --cache-control "no-cache, must-revalidate" \
             --content-type "application/json"
 

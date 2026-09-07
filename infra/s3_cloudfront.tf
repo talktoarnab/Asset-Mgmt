@@ -62,8 +62,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "frontend" {
   }
 }
 
-# SPA fallback while CloudFront is off. Error document returns index.html so
-# client-side routes such as /assets/abc still load the app.
+# Hash routes (#/scan) load index.html. Error document is a fallback for
+# extensionless paths while CloudFront is off.
 resource "aws_s3_bucket_website_configuration" "frontend" {
   count  = var.enable_cloudfront ? 0 : 1
   bucket = aws_s3_bucket.frontend.id
@@ -128,15 +128,6 @@ resource "aws_cloudfront_origin_access_control" "frontend" {
   name                              = "${local.name_prefix}-s3-oac"
   description                       = "Signed access from CloudFront to the private frontend bucket"
   origin_access_control_origin_type = "s3"
-  signing_behavior                  = "always"
-  signing_protocol                  = "sigv4"
-}
-
-resource "aws_cloudfront_origin_access_control" "api" {
-  count                             = var.enable_cloudfront ? 1 : 0
-  name                              = "${local.name_prefix}-lambda-oac"
-  description                       = "Signed access from CloudFront to the API Lambda function URL"
-  origin_access_control_origin_type = "lambda"
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
 }
@@ -232,7 +223,7 @@ resource "aws_cloudfront_function" "spa" {
 }
 
 locals {
-  api_origin_domain = replace(replace(aws_lambda_function_url.api.function_url, "https://", ""), "/", "")
+  api_origin_domain = replace(aws_apigatewayv2_api.http.api_endpoint, "https://", "")
 }
 
 resource "aws_cloudfront_distribution" "frontend" {
@@ -250,9 +241,8 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   origin {
-    domain_name              = local.api_origin_domain
-    origin_id                = "api-lambda"
-    origin_access_control_id = aws_cloudfront_origin_access_control.api[0].id
+    domain_name = local.api_origin_domain
+    origin_id   = "api-gateway"
 
     custom_origin_config {
       http_port              = 80
@@ -290,7 +280,7 @@ resource "aws_cloudfront_distribution" "frontend" {
 
   ordered_cache_behavior {
     path_pattern               = "/v1/*"
-    target_origin_id           = "api-lambda"
+    target_origin_id           = "api-gateway"
     viewer_protocol_policy     = "redirect-to-https"
     allowed_methods            = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods             = ["GET", "HEAD"]

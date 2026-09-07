@@ -10,38 +10,40 @@ without changing checkout.
 
 ## Architecture
 
-While AWS Support verifies the account for CloudFront, the desk is served from S3
-(HTTP website) and the browser calls the Lambda function URL directly.
-
 ```
-Browser  ── S3 website   (React desk app, HTTP)
-         ── Lambda URL   (API, /v1/*)
-                │
-                └── DynamoDB
+Browser  ── CloudFront
+              ├── S3            HTML, CSS, JS
+              └── API Gateway   /v1/*
+                    └── Lambda
+                          └── DynamoDB
 ```
 
-Set `enable_cloudfront = true` and re-apply after verification. That puts CloudFront
-in front of a private bucket and signs Lambda URL requests (AWS_IAM + OAC).
+While AWS Support verifies the account for CloudFront, the desk is served from the S3 website
+(HTTP) and the browser calls API Gateway directly.
 
 | Layer | Service | Notes |
 | --- | --- | --- |
-| App | S3 website (CloudFront held) | SPA. Error document is `index.html` for client routes |
-| API | Lambda function URL | Node 22, arm64. Public URL + desk PIN until CloudFront is on |
+| App | S3 (+ CloudFront when enabled) | Static HTML, CSS, JS. No build step |
+| API | API Gateway HTTP API → Lambda | Python 3.13, arm64. Desk PIN in `Authorization: Bearer` |
 | Data | DynamoDB | On-demand, PITR, one table per environment |
-| Auth | Desk PIN | HMAC session token in `Authorization: Bearer`. No Cognito |
+| Auth | Desk PIN | HMAC session token. No Cognito |
+
+Set `enable_cloudfront = true` and re-apply after verification. That puts CloudFront in front of
+a private bucket and same-origin `/v1` to API Gateway.
 
 ## Repository layout
 
 ```
-backend/     Lambda API (TypeScript)
-frontend/    React + Vite desk app
-infra/       Terraform (CloudFront, S3, Lambda, DynamoDB)
+backend/     Lambda API (Python)
+frontend/    Static HTML, CSS, JS for S3
+infra/       Terraform (CloudFront, S3, API Gateway, Lambda, DynamoDB)
   bootstrap/ Terraform state bucket + GitHub OIDC deploy role
 ```
 
 ## Running it locally
 
-You need Node 22+, Docker (for DynamoDB Local), and Terraform 1.10+ if you want to validate infra.
+You need Python 3.13+, Node (for the local static server), Docker (for DynamoDB Local), and
+Terraform 1.10+ if you want to validate infra.
 
 ```bash
 docker compose up -d          # DynamoDB Local on :8000
@@ -50,14 +52,14 @@ make seed                     # demo catalogue, members, and loans
 make dev                      # API :4000, app :5173
 ```
 
-Local auth is open (`AUTH_MODE=dev`). Any PIN on the sign-in screen works. The Vite proxy sends
-`/v1` to the local API, same as CloudFront does in AWS.
+Local auth is open (`AUTH_MODE=dev`). Any PIN on the sign-in screen works. The static server
+proxies `/v1` to the local API, same as CloudFront does in AWS.
 
 ## Deploying to AWS
 
-Region default is `eu-north-1`. You need the AWS CLI v2, Terraform 1.10+, Node 22+, and IAM
-permission to create Lambda, DynamoDB, S3, and IAM roles. CloudFront is optional until AWS
-verifies the account.
+Region default is `eu-north-1`. You need the AWS CLI v2, Terraform 1.10+, Python 3.13+, and IAM
+permission to create Lambda, API Gateway, DynamoDB, S3, and IAM roles. CloudFront is optional
+until AWS verifies the account.
 
 ### 1. Sign in
 
@@ -77,12 +79,12 @@ terraform apply
 
 Note `state_bucket`. Do not destroy this stack while the app is still deployed.
 
-### 3. Build Lambdas and apply
+### 3. Build the Lambda and apply
 
 ```bash
-cd backend && npm ci && npm run build
+bash backend/scripts/build.sh
 
-cd ../infra
+cd infra
 cp terraform.tfvars.example terraform.tfvars   # edit org_name if you like
 
 terraform init \
@@ -102,18 +104,20 @@ terraform output -raw desk_pin
 
 ### 4. Publish the frontend
 
+No npm install or bundler. Sync the static files as they are.
+
 ```bash
-cd ../frontend && npm ci && npm run build
-cd ../infra && terraform output -raw frontend_config > ../frontend/dist/config.json
+cd infra
+terraform output -raw frontend_config > ../frontend/config.json
 
 BUCKET=$(terraform output -raw frontend_bucket)
 DIST=$(terraform output -raw cloudfront_distribution_id)
 
-aws s3 sync ../frontend/dist "s3://$BUCKET" --delete \
-  --exclude index.html --exclude config.json --exclude '*.map' \
-  --cache-control 'public, max-age=31536000, immutable'
-aws s3 cp ../frontend/dist/index.html "s3://$BUCKET/index.html" --cache-control 'no-cache'
-aws s3 cp ../frontend/dist/config.json "s3://$BUCKET/config.json" --cache-control 'no-cache'
+aws s3 sync ../frontend "s3://$BUCKET" --delete \
+  --exclude serve.mjs --exclude index.html --exclude config.json --exclude .DS_Store \
+  --cache-control 'no-cache, must-revalidate'
+aws s3 cp ../frontend/index.html "s3://$BUCKET/index.html" --cache-control 'no-cache'
+aws s3 cp ../frontend/config.json "s3://$BUCKET/config.json" --cache-control 'no-cache'
 if [ -n "$DIST" ]; then
   aws cloudfront create-invalidation --distribution-id "$DIST" --paths '/*'
 fi
@@ -136,8 +140,8 @@ Two workflows in `.github/workflows/`. They authenticate to AWS with GitHub OIDC
 
 | Workflow | When | What it does |
 | --- | --- | --- |
-| **CI** | Pull requests and feature branches | Lint, test, `terraform validate`, then `terraform plan` |
-| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, build the SPA, sync to S3 (invalidate CloudFront when it is enabled) |
+| **CI** | Pull requests and feature branches | Test, `terraform validate`, then `terraform plan` |
+| **Deploy** | Push to `main`, or **Actions → Deploy → Run workflow** | Apply, sync static files to S3 (invalidate CloudFront when it is enabled) |
 
 ```bash
 cd infra/bootstrap

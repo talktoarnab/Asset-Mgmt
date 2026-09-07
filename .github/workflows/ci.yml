@@ -18,65 +18,53 @@ permissions:
   pull-requests: write
 
 env:
-  NODE_VERSION: '24'
+  PYTHON_VERSION: '3.13'
   TERRAFORM_VERSION: '1.12.2'
 
 jobs:
   backend:
-    name: Backend — lint, typecheck, test
+    name: Backend — lint, test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-python@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
 
       - name: Install dependencies
         working-directory: backend
-        run: npm ci
+        run: python -m pip install -r requirements-dev.txt
 
-      - name: Lint
-        working-directory: backend
-        run: npm run lint
-
-      - name: Typecheck
-        working-directory: backend
-        run: npm run typecheck
+      - name: Compile-check
+        run: python -m compileall -q backend/src
 
       - name: Unit tests
         working-directory: backend
-        run: npm test
+        run: python -m pytest
 
-      - name: Bundle Lambda artifacts
-        working-directory: backend
-        run: npm run build
+      - name: Copy Lambda artifact
+        run: bash backend/scripts/build.sh
 
   frontend:
-    name: Frontend — lint and build
+    name: Frontend — static files
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Lint
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Typecheck and build
-        working-directory: frontend
-        run: npm run build
+      - name: Required files exist
+        run: |
+          test -f frontend/index.html
+          test -f frontend/css/styles.css
+          test -f frontend/js/app.js
+          test -f frontend/js/api.js
+          test -f frontend/js/format.js
+          test -f frontend/js/ui.js
+          test -f frontend/vendor/qrcode.min.js
+          test -f frontend/favicon.svg
+          test -f frontend/serve.mjs
 
   terraform-validate:
     name: Terraform — format, validate, lint
@@ -99,7 +87,7 @@ jobs:
         working-directory: infra
         run: |
           mkdir -p ../backend/artifacts/api
-          test -f ../backend/artifacts/api/index.mjs || echo 'export const handler = async () => ({})' > ../backend/artifacts/api/index.mjs
+          test -f ../backend/artifacts/api/handler.py || printf '%s\n' 'def handler(event, context=None):' '    return {"statusCode": 200, "body": "{}"}' > ../backend/artifacts/api/handler.py
           terraform init -backend=false -input=false
 
       - name: Validate
@@ -147,19 +135,10 @@ jobs:
           fi
           exit "$missing"
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
-
       # The Lambda zips are hashed into the plan, so they must be built with the
       # same command the deploy uses or the plan would show phantom changes.
       - name: Build Lambda artifacts
-        working-directory: backend
-        run: |
-          npm ci
-          npm run build
+        run: bash backend/scripts/build.sh
 
       - name: Show GitHub OIDC claims
         run: |

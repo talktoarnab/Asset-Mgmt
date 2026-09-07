@@ -20,7 +20,7 @@ locals {
   # AWS Support has verified the account.
   app_url = var.enable_cloudfront ? "https://${aws_cloudfront_distribution.frontend[0].domain_name}" : "http://${aws_s3_bucket_website_configuration.frontend[0].website_endpoint}"
 
-  api_base_url = var.enable_cloudfront ? "" : trimsuffix(aws_lambda_function_url.api.function_url, "/")
+  api_base_url = var.enable_cloudfront ? "" : aws_apigatewayv2_api.http.api_endpoint
 
   backend_artifacts = "${path.module}/../backend/artifacts"
 
