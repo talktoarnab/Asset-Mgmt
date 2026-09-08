@@ -8,6 +8,7 @@ from domain.checkouts import (
     get_checkout,
     list_member_history,
     list_open_loans,
+    list_open_loans_for_asset,
     list_recent_checkouts,
     renew_checkout,
 )
@@ -20,6 +21,7 @@ from lib import env
 from lib.errors import HttpError, ValidationError, conflict, unauthorized
 from lib.http import created, error_response, json_response, no_content, ok, parse_body
 from lib.router import Router
+from domain.types import stock_levels
 
 router = Router()
 
@@ -109,8 +111,16 @@ def _list_assets(ctx):
     category = (_query(ctx).get("category") or "").strip()
     filtered = []
     for asset in assets:
-        if status and asset.get("status") != status:
-            continue
+        if status:
+            _stock, on_hand = stock_levels(asset)
+            if status == "available":
+                if asset.get("status") != "available" or on_hand < 1:
+                    continue
+            elif status == "checked_out":
+                if asset.get("status") in ("lost", "maintenance", "retired") or (_stock - on_hand) < 1:
+                    continue
+            elif asset.get("status") != status:
+                continue
         if category and asset.get("category") != category:
             continue
         if term:
@@ -118,6 +128,7 @@ def _list_assets(ctx):
                 [
                     asset.get("title", ""),
                     asset.get("code", ""),
+                    asset.get("sku") or "",
                     asset.get("creator") or "",
                     asset.get("identifier") or "",
                     asset.get("location") or "",
@@ -147,15 +158,16 @@ def _bulk_assets(ctx):
     return json_response(207, {"created": sum(1 for r in results if r["ok"]), "failed": sum(1 for r in results if not r["ok"]), "results": results})
 
 
+def _open_for_asset(org_id, asset):
+    loans = sorted(list_open_loans_for_asset(org_id, asset["assetId"]), key=lambda loan: loan.get("dueAt") or "")
+    return loans, loans[0] if loans else None
+
+
 def _get_asset(ctx):
-    asset = get_asset(ctx["auth"]["orgId"], ctx["params"]["assetId"])
-    active = None
-    if asset.get("activeCheckoutId"):
-        try:
-            active = get_checkout(ctx["auth"]["orgId"], asset["activeCheckoutId"])
-        except Exception:
-            active = None
-    return ok({"asset": asset, "activeCheckout": active})
+    org_id = ctx["auth"]["orgId"]
+    asset = get_asset(org_id, ctx["params"]["assetId"])
+    loans, active = _open_for_asset(org_id, asset)
+    return ok({"asset": asset, "activeCheckout": active, "openCheckouts": loans})
 
 
 def _patch_asset(ctx):
@@ -173,21 +185,18 @@ def _scan(ctx):
     org = ensure_org(ctx["auth"]["orgId"], env.org_name())
     data = parse_body(schemas.scan, ctx.get("body"), ctx.get("isBase64Encoded"))
     asset = resolve_asset_ref(ctx["auth"]["orgId"], data["ref"])
-    active = None
-    if asset.get("activeCheckoutId"):
-        try:
-            active = get_checkout(ctx["auth"]["orgId"], asset["activeCheckoutId"])
-        except Exception:
-            active = None
+    loans, active = _open_for_asset(ctx["auth"]["orgId"], asset)
     member = get_member(ctx["auth"]["orgId"], data["memberId"]) if data.get("memberId") else None
     blockers = evaluate_eligibility(org, member, asset, datetime.now(timezone.utc)) if member else []
+    _, on_hand = stock_levels(asset)
     return ok(
         {
             "asset": asset,
             "activeCheckout": active,
+            "openCheckouts": loans,
             "member": member,
             "blockers": blockers,
-            "suggestedAction": "checkin" if asset.get("status") == "checked_out" else "checkout",
+            "suggestedAction": "checkout" if on_hand > 0 else "checkin" if loans else "none",
         }
     )
 
@@ -224,7 +233,7 @@ def _create_checkout(ctx):
             "actor": actor_label(ctx["auth"]),
         }
     )
-    return created({"checkout": checkout, "asset": {**asset, "status": "checked_out"}, "member": member})
+    return created({"checkout": checkout, "asset": get_asset(ctx["auth"]["orgId"], asset["assetId"]), "member": member})
 
 
 def _checkin_id(ctx):
@@ -238,11 +247,11 @@ def _checkin_ref(ctx):
     ensure_org(ctx["auth"]["orgId"], env.org_name())
     data = parse_body(schemas.checkin_by_ref, ctx.get("body"), ctx.get("isBase64Encoded"))
     asset = resolve_asset_ref(ctx["auth"]["orgId"], data["assetRef"])
-    if not asset.get("activeCheckoutId"):
+    loans, active = _open_for_asset(ctx["auth"]["orgId"], asset)
+    if not active:
         raise conflict("NOT_ON_LOAN", f'"{asset["title"]}" is not currently checked out, so there is nothing to return.')
-    checkout = get_checkout(ctx["auth"]["orgId"], asset["activeCheckoutId"])
     closed = close_checkout(
-        checkout,
+        loans[0],
         {
             "actor": actor_label(ctx["auth"]),
             "outcome": "returned",
@@ -250,7 +259,7 @@ def _checkin_ref(ctx):
             "notes": data.get("notes"),
         },
     )
-    return ok({"checkout": closed, "asset": {**asset, "status": "available"}})
+    return ok({"checkout": closed, "asset": get_asset(ctx["auth"]["orgId"], asset["assetId"])})
 
 
 def _renew(ctx):

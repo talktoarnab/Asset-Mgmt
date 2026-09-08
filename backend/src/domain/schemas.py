@@ -132,7 +132,8 @@ def member_update(data: dict) -> dict:
 
 def asset_create(data: dict) -> dict:
     errors = []
-    code = _opt_str(data, "code", errors, max_len=32)
+    sku = _opt_str(data, "sku", errors, max_len=32)
+    code = _opt_str(data, "code", errors, max_len=32) or sku
     if code and not re.match(r"^[A-Za-z0-9-]{3,32}$", code):
         errors.append(_issue("code", "Use letters, numbers and dashes only"))
     out = {
@@ -145,6 +146,7 @@ def asset_create(data: dict) -> dict:
         "condition": _opt_str(data, "condition", errors, max_len=40),
         "replacementCost": _num(data, "replacementCost", errors, min_v=0, max_v=10_000_000),
         "status": _enum(data, "status", ASSET_STATUSES, errors),
+        "stock": _num(data, "stock", errors, integer=True, min_v=1, max_v=100_000),
     }
     tags = data.get("tags")
     if tags is not None:
@@ -169,10 +171,13 @@ def asset_update(data: dict) -> dict:
         ("condition", lambda: _opt_str(data, "condition", errors, max_len=40)),
         ("replacementCost", lambda: _num(data, "replacementCost", errors, min_v=0, max_v=10_000_000)),
         ("status", lambda: _enum(data, "status", ASSET_STATUSES, errors)),
+        ("stock", lambda: _num(data, "stock", errors, integer=True, min_v=1, max_v=100_000)),
     ]
     for key, fn in mapping:
         if key in data:
             out[key] = fn()
+    if "sku" in data and "code" not in data:
+        out["code"] = _opt_str(data, "sku", errors, max_len=32)
     if out.get("code") and not re.match(r"^[A-Za-z0-9-]{3,32}$", out["code"]):
         errors.append(_issue("code", "Use letters, numbers and dashes only"))
     _raise(errors)

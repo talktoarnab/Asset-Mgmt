@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from domain.types import stock_levels
 from lib.time import calendar_days_between, zoned_date_key
 
 LONG_OVERDUE_DAYS = 30
@@ -18,7 +19,16 @@ def build_summary(org, assets, members, open_loans, recent_checkouts, now=None):
         return sum(1 for a in assets if a.get("status") == status)
 
     total = len(assets)
-    checked_out = by_status("checked_out")
+    available = sum(
+        1
+        for a in assets
+        if a.get("status") not in ("lost", "maintenance", "retired") and stock_levels(a)[1] > 0
+    )
+    checked_out = sum(
+        1
+        for a in assets
+        if a.get("status") not in ("lost", "maintenance", "retired") and stock_levels(a)[1] < 1
+    )
     overdue = due_today = due_soon = long_overdue = value_at_risk = 0
     asset_by_id = {a["assetId"]: a for a in assets}
 
@@ -50,7 +60,7 @@ def build_summary(org, assets, members, open_loans, recent_checkouts, now=None):
         else now.isoformat().replace("+00:00", "Z"),
         "assets": {
             "total": total,
-            "available": by_status("available"),
+            "available": available,
             "checkedOut": checked_out,
             "lost": len(lost_assets),
             "maintenance": by_status("maintenance"),
@@ -101,7 +111,7 @@ def build_report(org, assets, members, open_loans, recent_checkouts, now=None):
     for asset in assets:
         entry = category_map.setdefault(asset["category"], {"total": 0, "checkedOut": 0})
         entry["total"] += 1
-        if asset.get("status") == "checked_out":
+        if asset.get("status") not in ("lost", "maintenance", "retired") and stock_levels(asset)[1] < 1:
             entry["checkedOut"] += 1
 
     activity = {}

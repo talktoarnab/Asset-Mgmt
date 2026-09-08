@@ -7,8 +7,8 @@ now = datetime(2026, 3, 10, 9, 0, 0, tzinfo=timezone.utc)
 org = make_org()
 
 assets = [
-    make_asset(assetId="a1", title="Sapiens", timesBorrowed=9, status="checked_out"),
-    make_asset(assetId="a2", title="Clean Code", timesBorrowed=4, status="checked_out"),
+    make_asset(assetId="a1", title="Sapiens", timesBorrowed=9, stock=1, available=0),
+    make_asset(assetId="a2", title="Clean Code", timesBorrowed=4, stock=1, available=0),
     make_asset(assetId="a3", title="Drill", category="tool", timesBorrowed=2),
     make_asset(assetId="a4", title="Projector", category="equipment", timesBorrowed=0),
     make_asset(assetId="a5", title="Camera", category="equipment", status="lost", replacementCost=38000, timesBorrowed=3),

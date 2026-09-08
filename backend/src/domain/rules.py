@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from domain.types import borrow_limit_for
+from domain.types import borrow_limit_for, stock_levels
 from lib.time import calendar_days_between, end_of_day_after
 
 
@@ -25,18 +25,22 @@ def evaluate_eligibility(org, member, asset, now: datetime):
             }
         )
     status = asset.get("status")
-    if status == "checked_out":
-        holder = f" to {asset['activeMemberName']}" if asset.get("activeMemberName") else ""
-        blockers.append(
-            {"code": "ASSET_UNAVAILABLE", "message": f"\"{asset['title']}\" is already checked out{holder}."}
-        )
-    elif status != "available":
+    if status not in (None, "available", "checked_out"):
         blockers.append(
             {
                 "code": "ASSET_UNAVAILABLE",
                 "message": f"\"{asset['title']}\" is marked {str(status).replace('_', ' ')}.",
             }
         )
+    else:
+        _stock, available = stock_levels(asset)
+        if available < 1:
+            blockers.append(
+                {
+                    "code": "ASSET_UNAVAILABLE",
+                    "message": f'"{asset["title"]}" is out of stock.',
+                }
+            )
     _ = org
     return blockers
 

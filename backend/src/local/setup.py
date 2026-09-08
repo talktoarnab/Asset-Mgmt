@@ -86,6 +86,7 @@ CATALOGUE = [
         "category": "tool",
         "location": "Tool wall",
         "replacementCost": 4200,
+        "stock": 4,
     },
     {
         "title": "Makita Orbital Sander",
@@ -93,6 +94,7 @@ CATALOGUE = [
         "category": "tool",
         "location": "Tool wall",
         "replacementCost": 6500,
+        "stock": 3,
     },
     {
         "title": "Canon EOS 200D Camera Kit",
@@ -161,7 +163,7 @@ def main():
     org = ensure_org(ORG_ID, "Kanchan Community Library")
     update_org(ORG_ID, {"contactPhone": "+91 80 4123 9000", "defaultLoanDays": 14})
 
-    assets = [create_asset(ORG_ID, entry) for entry in CATALOGUE]
+    assets = [create_asset(ORG_ID, {**entry, "stock": entry.get("stock") or 2}) for entry in CATALOGUE]
     print(f"seeded {len(assets)} assets")
     members = [create_member(ORG_ID, person, org["defaultCountryCode"]) for person in PEOPLE]
     print(f"seeded {len(members)} members")

@@ -6,7 +6,11 @@ from factories import make_asset, make_checkout, make_member, make_org
 now = datetime(2026, 3, 10, 9, 0, 0, tzinfo=timezone.utc)
 
 
-def test_allows_active_member():
+def test_allows_when_some_units_are_out():
+    blockers = evaluate_eligibility(
+        make_org(), make_member(), make_asset(stock=5, available=2), now
+    )
+    assert blockers == []
     blockers = evaluate_eligibility(make_org(), make_member(openLoans=1), make_asset(), now)
     assert blockers == []
 
@@ -24,15 +28,15 @@ def test_honours_override():
     assert blockers == []
 
 
-def test_names_current_holder():
+def test_blocks_when_out_of_stock():
     blockers = evaluate_eligibility(
         make_org(),
         make_member(),
-        make_asset(status="checked_out", activeMemberName="Rohit Verma"),
+        make_asset(stock=3, available=0),
         now,
     )
     assert blockers[0]["code"] == "ASSET_UNAVAILABLE"
-    assert "Rohit Verma" in blockers[0]["message"]
+    assert "out of stock" in blockers[0]["message"]
 
 
 def test_reports_every_problem():

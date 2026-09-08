@@ -72,6 +72,26 @@ export function titleCase(value) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+export function stockOf(asset) {
+  const stock = Number(asset?.stock ?? 1);
+  const available =
+    asset?.available === undefined || asset?.available === null
+      ? asset?.status === 'checked_out' || asset?.status === 'lost'
+        ? 0
+        : stock
+      : Number(asset.available);
+  return { stock, available, onLoan: Math.max(0, stock - available) };
+}
+
+export function stockBadge(asset) {
+  if (asset.status === 'lost' || asset.status === 'maintenance' || asset.status === 'retired') {
+    return { text: titleCase(asset.status), tone: STATUS_TONE[asset.status] ?? 'neutral' };
+  }
+  const { stock, available } = stockOf(asset);
+  if (available < 1) return { text: 'Out of stock', tone: 'info' };
+  return { text: `${available} of ${stock} in stock`, tone: 'positive' };
+}
+
 export const STATUS_TONE = {
   available: 'positive',
   checked_out: 'info',

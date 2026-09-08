@@ -6,6 +6,8 @@ import {
   dueLabel,
   formatDate,
   formatPhone,
+  stockBadge,
+  stockOf,
   titleCase,
 } from './format.js';
 import {
@@ -256,6 +258,7 @@ function assetPayload(form, editing) {
   if (data.location?.trim()) payload.location = data.location.trim();
   if (data.replacementCost?.trim()) payload.replacementCost = Number(data.replacementCost);
   if (data.code?.trim()) payload.code = data.code.trim().toUpperCase();
+  if (data.stock?.trim()) payload.stock = Number(data.stock);
   if (editing) payload.status = data.status;
   return payload;
 }
@@ -269,7 +272,8 @@ function assetFormBody(draft, editing, errors = {}) {
     ${field('Shelf or location', `<input name="location" value="${esc(draft.location)}" placeholder="A2, Tool wall, Locker 1">`, { error: errors.location })}
     ${field('Replacement cost', `<input name="replacementCost" type="number" min="0" value="${esc(draft.replacementCost)}">`, { hint: 'Used for shrinkage reporting', error: errors.replacementCost })}
     ${editing ? field('Status', select('status', draft.status, ASSET_STATUSES)) : ''}
-    ${field('Label code', `<input name="code" value="${esc(draft.code)}" placeholder="BK-4F2A9C">`, { hint: editing ? 'Changing this invalidates printed labels' : 'Leave blank to generate one', error: errors.code })}
+    ${field('SKU / item ID', `<input name="code" value="${esc(draft.code)}" placeholder="BK-4F2A9C">`, { hint: editing ? 'Changing this invalidates printed labels' : 'Leave blank to generate one', error: errors.code })}
+    ${field('Stock quantity', `<input name="stock" type="number" min="1" value="${esc(draft.stock || '1')}">`, { hint: 'How many units you own. Checkout takes one unit from the shelf.', error: errors.stock })}
   </form>`;
 }
 
@@ -359,7 +363,7 @@ function openMemberForm({ title, submitLabel, draft, editing, onSubmit }) {
 }
 
 function emptyAssetDraft() {
-  return { title: '', category: 'book', creator: '', identifier: '', location: '', replacementCost: '', status: 'available', code: '' };
+  return { title: '', category: 'book', creator: '', identifier: '', location: '', replacementCost: '', status: 'available', code: '', stock: '1' };
 }
 
 function emptyMemberDraft() {
@@ -497,7 +501,7 @@ async function renderScan(view) {
     if (!ref.trim()) return;
     try {
       result = await api.scan(ref.trim(), withMember);
-      if (result.suggestedAction === 'checkin') memberId = undefined;
+      if (result.suggestedAction === 'checkin' && !(stockOf(result.asset).available > 0)) memberId = undefined;
       paint();
     } catch (error) {
       result = undefined;
@@ -511,7 +515,7 @@ async function renderScan(view) {
     view.innerHTML = `
       ${pageHead('Desk', 'Scan with a handheld reader, or type the code printed on the label, then lend or return.', result ? btn('Start over', { iconName: 'close', extra: 'data-act="reset"' }) : '')}
       <div class="scan-layout">
-        ${card(`<form id="scan-form"><div class="field"><label for="manual-code">Scan or type a label code</label><div class="row"><input id="manual-code" class="grow scanner-wedge" name="ref" placeholder="Ready for handheld scanner" autocomplete="off" spellcheck="false" value="${esc(result?.asset?.code ?? '')}"><button class="btn" type="submit">Find</button></div><p class="tiny muted" style="margin-top:8px">Handheld scanners send the barcode and Enter. Camera scanning can be added later on this same screen.</p></div></form>`)}
+        ${card(`<form id="scan-form"><div class="field"><label for="manual-code">Scan or type a SKU</label><div class="row"><input id="manual-code" class="grow scanner-wedge" name="ref" placeholder="Ready for handheld scanner" autocomplete="off" spellcheck="false" value="${esc(result?.asset?.code ?? '')}"><button class="btn" type="submit">Find</button></div><p class="tiny muted" style="margin-top:8px">Handheld scanners send the barcode and Enter. Camera scanning can be added later on this same screen.</p></div></form>`)}
         <div class="stack" id="scan-result">
           ${
             !result
@@ -520,17 +524,25 @@ async function renderScan(view) {
                   <div class="row-between" style="margin-top:12px;align-items:flex-start">
                     <div class="col grow"><a href="#/assets/${esc(result.asset.assetId)}"><h2>${esc(result.asset.title)}</h2></a>
                     <span class="small muted">${[result.asset.creator, titleCase(result.asset.category), result.asset.location].filter(Boolean).map(esc).join(' · ')}</span>
-                    <span class="mono muted" style="margin-top:4px">${esc(result.asset.code)}</span></div>
-                    ${badge(titleCase(result.asset.status === 'checked_out' ? 'On loan' : result.asset.status), result.asset.status === 'available' ? 'positive' : 'info', true)}
+                    <span class="mono muted" style="margin-top:4px">${esc(result.asset.sku || result.asset.code)}</span></div>
+                    ${badge(stockBadge(result.asset).text, stockBadge(result.asset).tone, true)}
                   </div>`)}
                 ${
-                  result.activeCheckout
+                  (result.openCheckouts ?? (result.activeCheckout ? [result.activeCheckout] : []))
+                    .length
                     ? card(
-                        `<div class="picked">${avatar(result.activeCheckout.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(result.activeCheckout.memberId)}">${esc(result.activeCheckout.memberName)}</a><span class="tiny muted">${esc(formatPhone(result.activeCheckout.memberPhone))} · taken ${esc(formatDate(result.activeCheckout.checkedOutAt, tz()))}</span></div>${badge(dueLabel(result.activeCheckout.dueAt, tz()).text, dueLabel(result.activeCheckout.dueAt, tz()).tone, true)}</div>
-                         ${btn('Check this item back in', { variant: 'primary', size: 'lg', block: true, extra: 'style="margin-top:14px" data-act="checkin"' })}`,
-                        { title: 'Currently on loan' },
+                        `${(result.openCheckouts ?? [result.activeCheckout]).map((loan) => {
+                          const due = dueLabel(loan.dueAt, tz());
+                          return `<div class="picked" style="margin-bottom:10px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(formatPhone(loan.memberPhone))} · taken ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(due.text, due.tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`;
+                        }).join('')}
+                         ${!(stockOf(result.asset).available > 0) ? btn('Check the oldest loan back in', { variant: 'ghost', size: 'sm', block: true, extra: 'data-act="checkin"' }) : ''}`,
+                        { title: `${(result.openCheckouts ?? [result.activeCheckout]).length} on loan` },
                       )
-                    : card(`<div class="step ${memberId ? 'done' : ''}"><span class="n">${memberId ? icon('check', 12) : '2'}</span>Who is borrowing?</div>
+                    : ''
+                }
+                ${
+                  stockOf(result.asset).available > 0
+                    ? card(`<div class="step ${memberId ? 'done' : ''}"><span class="n">${memberId ? icon('check', 12) : '2'}</span>Who is borrowing?</div>
                         ${
                           selected
                             ? `<div class="picked" style="margin-top:12px">${avatar(selected.name)}<div class="col grow"><span class="small strong">${esc(selected.name)}</span><span class="tiny muted">${esc(formatPhone(selected.phone))} · ${selected.openLoans} item(s) out</span></div>${btn('Change', { size: 'sm', variant: 'ghost', extra: 'data-act="clear-member"' })}</div>`
@@ -551,7 +563,9 @@ async function renderScan(view) {
                           memberId
                             ? `<div style="margin-top:14px" class="stack">${field('Loan period', select('loanDays', String(org().defaultLoanDays), loanOptions()))}${btn(`Check out to ${esc(selected?.name.split(' ')[0] ?? '')}`, { variant: 'primary', size: 'lg', block: true, extra: `data-act="checkout" ${result.blockers.length ? 'disabled' : ''}` })}</div>`
                             : ''
-                        }`)}
+                        }`)
+                    : ''
+                }
                 `
           }
         </div>
@@ -589,8 +603,9 @@ async function renderScan(view) {
       paint();
     } else if (act === 'checkin') {
       try {
-        const response = await api.checkinByRef(result.asset.assetId);
-        toast(`"${response.asset.title}" checked in. Thanks!`, 'success');
+        if (el.dataset.id) await api.checkin(el.dataset.id);
+        else await api.checkinByRef(result.asset.assetId);
+        toast(`"${result.asset.title}" checked in. Thanks!`, 'success');
         result = undefined;
         memberId = undefined;
         refreshCounts();
@@ -723,12 +738,12 @@ async function renderAssets(view) {
     view.innerHTML = `
       ${pageHead(
         'Catalogue',
-        `${items.length} item${items.length === 1 ? '' : 's'} on the shelves.`,
+        `${items.length} SKU${items.length === 1 ? '' : 's'} in the catalogue.`,
         `${btn('<span class="hide-sm">Print labels</span>', { iconName: 'print', href: '#/assets/labels' })}${btn('Add several', { extra: 'data-act="bulk"' })}${btn('Add item', { variant: 'primary', iconName: 'plus', extra: 'data-act="add"' })}`,
       )}
       <div class="stack">
         <div class="row wrap">
-          ${searchInput(query, 'Search titles, codes, authors, shelves')}
+          ${searchInput(query, 'Search titles, SKUs, authors, shelves')}
           <div class="field hide-sm">${select('status', status, [
             { value: '', label: 'Any status' },
             { value: 'available', label: 'Available' },
@@ -746,11 +761,11 @@ async function renderAssets(view) {
                 description: query ? 'Try a different title, code or shelf.' : 'Add your first book, tool or piece of equipment to start lending it out.',
                 action: query ? '' : btn('Add the first item', { variant: 'primary', iconName: 'plus', extra: 'data-act="add"' }),
               })
-            : `<div class="table-wrap"><table><thead><tr><th>Item</th><th class="hide-sm">Category</th><th class="hide-sm">Shelf</th><th>Status</th><th class="right hide-sm">Times out</th></tr></thead><tbody>${shown
-                .map(
-                  (asset) =>
-                    `<tr class="clickable" data-href="#/assets/${esc(asset.assetId)}"><td><div class="col"><a class="strong" href="#/assets/${esc(asset.assetId)}">${esc(asset.title)}</a><span class="tiny muted truncate"><span class="mono">${esc(asset.code)}</span>${asset.creator ? ` · ${esc(asset.creator)}` : ''}</span></div></td><td class="hide-sm small muted">${esc(titleCase(asset.category))}</td><td class="hide-sm small muted">${esc(asset.location ?? '—')}</td><td><div class="col">${badge(asset.status === 'checked_out' ? 'On loan' : titleCase(asset.status), STATUS_TONE[asset.status] ?? 'neutral', true)}${asset.status === 'checked_out' && asset.dueAt ? `<span class="tiny muted">${esc(asset.activeMemberName)} · ${esc(dueLabel(asset.dueAt, tz()).text)}</span>` : ''}</div></td><td class="right small muted hide-sm">${asset.timesBorrowed}</td></tr>`,
-                )
+            : `<div class="table-wrap"><table><thead><tr><th>Item</th><th class="hide-sm">SKU</th><th class="hide-sm">Category</th><th class="hide-sm">Shelf</th><th>Stock</th><th class="right hide-sm">Times out</th></tr></thead><tbody>${shown
+                .map((asset) => {
+                  const stock = stockBadge(asset);
+                  return `<tr class="clickable" data-href="#/assets/${esc(asset.assetId)}"><td><div class="col"><a class="strong" href="#/assets/${esc(asset.assetId)}">${esc(asset.title)}</a><span class="tiny muted truncate">${asset.creator ? esc(asset.creator) : ''}</span></div></td><td class="hide-sm mono small muted">${esc(asset.sku || asset.code)}</td><td class="hide-sm small muted">${esc(titleCase(asset.category))}</td><td class="hide-sm small muted">${esc(asset.location ?? '—')}</td><td><div class="col">${badge(stock.text, stock.tone, true)}${stockOf(asset).onLoan ? `<span class="tiny muted">${stockOf(asset).onLoan} on loan</span>` : ''}</div></td><td class="right small muted hide-sm">${asset.timesBorrowed}</td></tr>`;
+                })
                 .join('')}</tbody></table></div>`,
           { bodyClass: '' },
         )}
@@ -781,7 +796,7 @@ async function renderAssets(view) {
           editing: false,
           onSubmit: async (payload) => {
             const asset = await api.createAsset(payload);
-            toast(`"${asset.title}" added with code ${asset.code}.`, 'success');
+            toast(`"${asset.title}" added (${asset.sku || asset.code}, stock ${asset.stock}).`, 'success');
             paint();
           },
         });
@@ -812,7 +827,7 @@ function openBulkAdd(onDone) {
       .filter((row) => row.title);
   const updateCount = () => {
     const n = parse().length;
-    bodyEl.querySelector('[data-count]').textContent = n ? `${n} item${n === 1 ? '' : 's'} ready. A label code will be generated for each.` : '';
+    bodyEl.querySelector('[data-count]').textContent = n ? `${n} SKU${n === 1 ? '' : 's'} ready. Each gets a generated SKU and stock of 1.` : '';
   };
   bodyEl.addEventListener('input', updateCount);
   overlay.addEventListener('click', async (event) => {
@@ -840,7 +855,9 @@ async function renderAssetDetail(view, assetId) {
     view.innerHTML = `<div class="stack">${notice(error.message, 'danger')}${btn('Back to catalogue', { iconName: 'back', href: '#/assets' })}</div>`;
     return;
   }
-  const { asset, activeCheckout } = data;
+  const { asset, activeCheckout, openCheckouts = activeCheckout ? [activeCheckout] : [] } = data;
+  const stock = stockBadge(asset);
+  const levels = stockOf(asset);
   const qr = await qrImg(asset.code || asset.assetId, 200, `QR label for ${asset.title}`);
   view.innerHTML = `
     <div class="stack">
@@ -853,24 +870,27 @@ async function renderAssetDetail(view, assetId) {
       </div>
       <div class="grid grid-2">
         <div class="stack">
-          ${card(`<div class="row-between">${badge(asset.status === 'checked_out' ? 'On loan' : titleCase(asset.status), STATUS_TONE[asset.status] ?? 'neutral', true)}<span class="small muted">Borrowed ${asset.timesBorrowed} time${asset.timesBorrowed === 1 ? '' : 's'}</span></div>
+          ${card(`<div class="row-between">${badge(stock.text, stock.tone, true)}<span class="small muted">Borrowed ${asset.timesBorrowed} time${asset.timesBorrowed === 1 ? '' : 's'}</span></div>
             ${
-              activeCheckout
-                ? `<div class="picked" style="margin-top:14px">${avatar(activeCheckout.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(activeCheckout.memberId)}">${esc(activeCheckout.memberName)}</a><span class="tiny muted">${esc(formatPhone(activeCheckout.memberPhone))} · since ${esc(formatDate(activeCheckout.checkedOutAt, tz()))}</span></div>${badge(dueLabel(activeCheckout.dueAt, tz()).text, dueLabel(activeCheckout.dueAt, tz()).tone, true)}</div>${btn('Check back in', { variant: 'primary', block: true, extra: 'style="margin-top:12px" data-act="checkin"' })}`
-                : asset.status === 'available'
-                  ? btn('Lend this item', { variant: 'primary', iconName: 'scan', block: true, extra: 'style="margin-top:14px" data-act="lend"' })
-                  : ''
-            }`, { title: 'Status' })}
+              openCheckouts.length
+                ? openCheckouts.map((loan) => `<div class="picked" style="margin-top:14px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(formatPhone(loan.memberPhone))} · since ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(dueLabel(loan.dueAt, tz()).text, dueLabel(loan.dueAt, tz()).tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`).join('')
+                : ''
+            }
+            ${
+              levels.available > 0 && asset.status === 'available'
+                ? btn('Lend a unit', { variant: 'primary', iconName: 'scan', block: true, extra: 'style="margin-top:14px" data-act="lend"' })
+                : ''
+            }`, { title: 'Stock' })}
           ${card(
             `<div class="stack" style="gap:10px">
-              ${[['Label code', `<span class="mono">${esc(asset.code)}</span>`], ['Category', titleCase(asset.category)], ['Author / maker', asset.creator ?? '—'], ['ISBN / serial', asset.identifier ?? '—'], ['Shelf', asset.location ?? '—'], ['Condition', titleCase(asset.condition ?? 'good')], ['Replacement cost', currency(asset.replacementCost)], ['Added', formatDate(asset.createdAt, tz())]]
+              ${[['SKU', `<span class="mono">${esc(asset.sku || asset.code)}</span>`], ['Stock owned', String(levels.stock)], ['On the shelf', String(levels.available)], ['On loan', String(levels.onLoan)], ['Category', titleCase(asset.category)], ['Author / maker', asset.creator ?? '—'], ['ISBN / serial', asset.identifier ?? '—'], ['Shelf', asset.location ?? '—'], ['Condition', titleCase(asset.condition ?? 'good')], ['Replacement cost', currency(asset.replacementCost)], ['Added', formatDate(asset.createdAt, tz())]]
                 .map(([label, value]) => `<div class="row-between small"><span class="muted">${esc(label)}</span><span class="strong">${typeof value === 'string' && value.startsWith('<') ? value : esc(value)}</span></div>`)
                 .join('')}
             </div>`,
             { title: 'Details' },
           )}
         </div>
-        ${card(`<div class="col center" style="align-items:center;gap:12px">${qr}<div class="center"><div class="strong small">${esc(asset.title)}</div><div class="mono muted">${esc(asset.code)}</div></div><p class="tiny muted center" style="max-width:260px">Stick this on the item. A handheld scanner reads the QR (or the code underneath) into the desk screen.</p></div>`, { title: 'Label', actions: btn('Print sheet', { size: 'sm', iconName: 'print', href: '#/assets/labels' }) })}
+        ${card(`<div class="col center" style="align-items:center;gap:12px">${qr}<div class="center"><div class="strong small">${esc(asset.title)}</div><div class="mono muted">${esc(asset.sku || asset.code)}</div></div><p class="tiny muted center" style="max-width:260px">Stick this SKU on the item. A handheld scanner reads the QR (or the code underneath) into the desk screen.</p></div>`, { title: 'Label', actions: btn('Print sheet', { size: 'sm', iconName: 'print', href: '#/assets/labels' }) })}
       </div>
     </div>`;
   on(view,'click', async (event) => {
@@ -889,6 +909,7 @@ async function renderAssetDetail(view, assetId) {
           replacementCost: asset.replacementCost === undefined ? '' : String(asset.replacementCost),
           status: asset.status === 'checked_out' ? 'available' : asset.status,
           code: asset.code,
+          stock: String(asset.stock ?? 1),
         },
         onSubmit: async (payload) => {
           await api.updateAsset(asset.assetId, payload);
@@ -897,9 +918,11 @@ async function renderAssetDetail(view, assetId) {
         },
       });
     }
-    if (event.target.closest('[data-act="checkin"]') && activeCheckout) {
+    if (event.target.closest('[data-act="checkin"]')) {
+      const id = event.target.closest('[data-act="checkin"]')?.dataset.id || activeCheckout?.checkoutId;
+      if (!id) return;
       try {
-        await api.checkin(activeCheckout.checkoutId);
+        await api.checkin(id);
         toast(`"${asset.title}" is back on the shelf.`, 'success');
         refreshCounts();
         renderAssetDetail(view, assetId);
@@ -1133,7 +1156,7 @@ async function renderLabels(view) {
             ? `<section><h2 class="no-print" style="margin-bottom:12px">Preview</h2><div class="label-sheet" style="grid-template-columns:repeat(${esc(perRow)},1fr)">${chosen
                 .map(
                   (asset, i) =>
-                    `<div class="label-tag">${qrs[i]}<div class="col"><span class="label-title">${esc(asset.title)}</span><span class="label-code">${esc(asset.code)}</span></div></div>`,
+                    `<div class="label-tag">${qrs[i]}<div class="col"><span class="label-title">${esc(asset.title)}</span><span class="label-code">${esc(asset.sku || asset.code)}</span></div></div>`,
                 )
                 .join('')}</div></section>`
             : ''

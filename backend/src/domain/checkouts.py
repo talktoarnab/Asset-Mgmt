@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
+from domain.assets import persist_stock_fields
 from domain import keys
 from domain.rules import can_renew, compute_due_at, evaluate_eligibility
 from domain.types import borrow_limit_for
@@ -39,7 +40,7 @@ def _explain_cancellation(error, member, asset):
     if asset_reason.get("Code") == "ConditionalCheckFailed":
         raise conflict(
             "ASSET_UNAVAILABLE",
-            f'"{asset["title"]}" was just taken by someone else. Refresh and try again.',
+            f'"{asset["title"]}" has no units left on the shelf. Refresh and try again.',
         )
     if member_reason.get("Code") == "ConditionalCheckFailed":
         raise conflict(
@@ -58,6 +59,7 @@ def checkout_asset(request: dict) -> dict:
     blockers = evaluate_eligibility(org, member, asset, now)
     if blockers:
         raise unprocessable("CHECKOUT_BLOCKED", blockers[0]["message"], {"blockers": blockers})
+    persist_stock_fields(asset)
 
     loan_days = request.get("loanDays") or org["defaultLoanDays"]
     checkout = drop_none(
@@ -96,21 +98,17 @@ def checkout_asset(request: dict) -> dict:
                         "TableName": table_name(),
                         "Key": serialize_item({"PK": keys.pk(org["orgId"]), "SK": keys.sk_asset(asset["assetId"])}),
                         "UpdateExpression": (
-                            "SET #status = :checkedOut, activeCheckoutId = :cid, activeMemberId = :mid, "
-                            "activeMemberName = :mname, dueAt = :due, updatedAt = :now ADD timesBorrowed :one"
+                            "SET updatedAt = :now ADD available :minusOne, timesBorrowed :one"
                         ),
-                        "ConditionExpression": "attribute_exists(SK) AND #status = :available",
+                        "ConditionExpression": "attribute_exists(SK) AND #status = :available AND available > :zero",
                         "ExpressionAttributeNames": {"#status": "status"},
                         "ExpressionAttributeValues": serialize_item(
                             {
-                                ":checkedOut": "checked_out",
                                 ":available": "available",
-                                ":cid": checkout["checkoutId"],
-                                ":mid": member["memberId"],
-                                ":mname": member["name"],
-                                ":due": checkout["dueAt"],
                                 ":now": checkout["checkedOutAt"],
                                 ":one": 1,
+                                ":minusOne": -1,
+                                ":zero": 0,
                             }
                         ),
                     }
@@ -155,12 +153,8 @@ def close_checkout(checkout: dict, options: dict) -> dict:
         raise conflict("ALREADY_CLOSED", f"This loan was already {checkout.get('status')} on {closed}.")
 
     now = _iso(options.get("now") or datetime.now(timezone.utc))
-    asset_status = "available" if options["outcome"] == "returned" else "lost"
     notes_expr = ", notes = :notes " if options.get("notes") else ""
     lost_expr = ", markedLostAt = :now " if options["outcome"] == "lost" else ""
-    condition_name = {**( {"#condition": "condition"} if options.get("condition") else {} )}
-    condition_set = ", #condition = :condition" if options.get("condition") else ""
-
     values = {
         ":status": options["outcome"],
         ":open": "open",
@@ -170,9 +164,18 @@ def close_checkout(checkout: dict, options: dict) -> dict:
     if options.get("notes"):
         values[":notes"] = options["notes"]
 
-    asset_values = {":assetStatus": asset_status, ":now": now}
-    if options.get("condition"):
-        asset_values[":condition"] = options["condition"]
+    if options["outcome"] == "returned":
+        asset_update = {
+            "UpdateExpression": "SET updatedAt = :now ADD available :one",
+            "ConditionExpression": "attribute_exists(SK)",
+            "ExpressionAttributeValues": serialize_item({":now": now, ":one": 1}),
+        }
+    else:
+        asset_update = {
+            "UpdateExpression": "SET updatedAt = :now ADD stock :minusOne",
+            "ConditionExpression": "attribute_exists(SK) AND stock > :zero",
+            "ExpressionAttributeValues": serialize_item({":now": now, ":minusOne": -1, ":zero": 0}),
+        }
 
     client().transact_write_items(
         TransactItems=[
@@ -197,12 +200,7 @@ def close_checkout(checkout: dict, options: dict) -> dict:
                     "Key": serialize_item(
                         {"PK": keys.pk(checkout["orgId"]), "SK": keys.sk_asset(checkout["assetId"])}
                     ),
-                    "UpdateExpression": (
-                        f"SET #status = :assetStatus, updatedAt = :now{condition_set} "
-                        "REMOVE activeCheckoutId, activeMemberId, activeMemberName, dueAt"
-                    ),
-                    "ExpressionAttributeNames": {"#status": "status", **condition_name},
-                    "ExpressionAttributeValues": serialize_item(asset_values),
+                    **asset_update,
                 }
             },
             {
@@ -269,13 +267,17 @@ def renew_checkout(checkout: dict, org: dict, actor: str, now=None) -> dict:
                     "Key": serialize_item(
                         {"PK": keys.pk(checkout["orgId"]), "SK": keys.sk_asset(checkout["assetId"])}
                     ),
-                    "UpdateExpression": "SET dueAt = :due, updatedAt = :now",
-                    "ExpressionAttributeValues": serialize_item({":due": due_at, ":now": _iso(now)}),
+                    "UpdateExpression": "SET updatedAt = :now",
+                    "ExpressionAttributeValues": serialize_item({":now": _iso(now)}),
                 }
             },
         ]
     )
     return {**checkout, "dueAt": due_at, "renewals": checkout.get("renewals", 0) + 1, "remindersSent": 0}
+
+
+def list_open_loans_for_asset(org_id: str, asset_id: str) -> list:
+    return [loan for loan in list_open_loans(org_id) if loan.get("assetId") == asset_id]
 
 
 def list_open_loans(org_id: str, due_before: str | None = None) -> list:
