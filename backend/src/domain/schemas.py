@@ -187,8 +187,8 @@ def asset_update(data: dict) -> dict:
 def asset_bulk(data: dict) -> dict:
     errors = []
     assets = data.get("assets")
-    if not isinstance(assets, list) or not (1 <= len(assets) <= 100):
-        raise ValidationError([_issue("assets", "Provide between 1 and 100 items")])
+    if not isinstance(assets, list) or not (1 <= len(assets) <= 200):
+        raise ValidationError([_issue("assets", "Provide between 1 and 200 items")])
     parsed = [asset_create(row) for row in assets]
     _raise(errors)
     return {"assets": parsed}

@@ -930,7 +930,7 @@ async function renderAssets(view) {
 function openBulkAdd(onDone) {
   const { overlay, close, bodyEl } = openModal({
     title: 'Add several items',
-    body: `<div class="stack">${field('Category for all of these', select('category', 'book', CATEGORIES))}${field('One item per line', '<textarea name="text" rows="9" placeholder="Sapiens, Yuval Noah Harari&#10;Things Fall Apart, Chinua Achebe&#10;Clean Code"></textarea>', { hint: 'Optionally add the author or maker after a comma' })}<p class="small muted" data-count></p></div>`,
+    body: `<div class="stack">${field('Category for all of these', select('category', 'book', CATEGORIES))}${field('One item per line', '<textarea name="text" rows="9" placeholder="Sapiens, Yuval Noah Harari&#10;Things Fall Apart, Chinua Achebe&#10;Clean Code"></textarea>', { hint: 'Optionally add the author or maker after a comma. Up to 200 lines. A title,author header is ignored.' })}<p class="small muted" data-count></p></div>`,
     footer: `${btn('Cancel', { extra: 'data-close' })}${btn('Add items', { variant: 'primary', extra: 'data-save' })}`,
   });
   const parse = () =>
@@ -943,7 +943,13 @@ function openBulkAdd(onDone) {
         const creator = rest.join(',').trim();
         return { title: title.trim(), category: bodyEl.querySelector('[name="category"]').value, ...(creator ? { creator } : {}) };
       })
-      .filter((row) => row.title);
+      .filter((row, index) => {
+        if (!row.title) return false;
+        if (index === 0 && /^(title|name)$/i.test(row.title) && /^(author|creator|maker)?$/i.test(row.creator || '')) {
+          return false;
+        }
+        return true;
+      });
   const updateCount = () => {
     const n = parse().length;
     bodyEl.querySelector('[data-count]').textContent = n ? `${n} SKU${n === 1 ? '' : 's'} ready. Each gets a generated SKU and one identified unit.` : '';

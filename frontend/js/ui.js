@@ -122,7 +122,9 @@ export function toast(message, tone = 'info') {
 
 export function toastFail(error) {
   if (error?.status === 401) return;
-  toast(error instanceof Error ? error.message : 'Something went wrong.', 'error');
+  const details = error?.fieldErrors ? Object.values(error.fieldErrors).filter(Boolean) : [];
+  const extra = details.length ? ` ${details.join(' ')}` : '';
+  toast((error instanceof Error ? error.message : 'Something went wrong.') + extra, 'error');
 }
 
 export function closeModals() {
