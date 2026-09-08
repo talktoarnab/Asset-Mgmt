@@ -58,13 +58,13 @@ variable "desk_pin" {
 }
 
 variable "org_id" {
-  description = "Single-branch identifier stored on every DynamoDB item."
+  description = "Default branch created on first sign-in if it does not exist yet. Other desks are opened from the app."
   type        = string
   default     = "main"
 }
 
 variable "org_name" {
-  description = "Display name for the branch, used when the org record is first created."
+  description = "Display name for the default branch, used when that org record is first created."
   type        = string
   default     = "My Library"
 }

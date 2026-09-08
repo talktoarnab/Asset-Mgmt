@@ -21,7 +21,7 @@ from domain.assets import create_asset
 from domain.checkouts import checkout_asset, get_checkout
 from domain.keys import open_loans_pk, open_loans_sk, pk, sk_checkout
 from domain.members import create_member, get_member
-from domain.orgs import ensure_org, update_org
+from domain.orgs import ensure_org, set_org_pin, update_org
 from lib.ddb import drop_none, table
 
 TABLE = os.environ["TABLE_NAME"]
@@ -158,19 +158,47 @@ def backdate(org_id, checkout_id, days_ago, loan_days):
     )
 
 
-def main():
-    recreate_table()
-    org = ensure_org(ORG_ID, "Kanchan Community Library")
-    update_org(ORG_ID, {"contactPhone": "+91 80 4123 9000", "defaultLoanDays": 14})
+WORKSHOP = [
+    {
+        "title": "DeWalt Circular Saw",
+        "creator": "DeWalt",
+        "category": "tool",
+        "location": "Bay 1",
+        "replacementCost": 8900,
+        "stock": 2,
+    },
+    {
+        "title": "F-clamp set (6)",
+        "creator": "Irwin",
+        "category": "tool",
+        "location": "Bay 2",
+        "replacementCost": 1800,
+        "stock": 4,
+    },
+    {
+        "title": "Soldering station",
+        "creator": "Weller",
+        "category": "device",
+        "location": "Electronics",
+        "replacementCost": 5200,
+        "stock": 3,
+    },
+]
 
-    assets = [create_asset(ORG_ID, {**entry, "stock": entry.get("stock") or 2}) for entry in CATALOGUE]
-    print(f"seeded {len(assets)} assets")
-    members = [create_member(ORG_ID, person, org["defaultCountryCode"]) for person in PEOPLE]
-    print(f"seeded {len(members)} members")
+WORKSHOP_PEOPLE = [
+    {"name": "Kavya Reddy", "phone": "9000011122", "tier": "staff"},
+    {"name": "Omar Khalid", "phone": "9000033344", "tier": "standard"},
+]
 
-    loans = [(0, 0, 20), (6, 1, 16), (8, 2, 13), (3, 0, 5), (10, 4, 1)]
+
+def seed_branch(org_id, name, catalogue, people, loans=()):
+    org = ensure_org(org_id, name)
+    set_org_pin(org_id, "123456")
+    update_org(org_id, {"contactPhone": "+91 80 4123 9000", "defaultLoanDays": 14})
+    assets = [create_asset(org_id, {**entry, "stock": entry.get("stock") or 2}) for entry in catalogue]
+    members = [create_member(org_id, person, org["defaultCountryCode"]) for person in people]
     for asset_index, member_index, days_ago in loans:
-        fresh = get_member(ORG_ID, members[member_index]["memberId"])
+        fresh = get_member(org_id, members[member_index]["memberId"])
         checkout = checkout_asset(
             {
                 "org": {**org, "contactPhone": "+91 80 4123 9000"},
@@ -179,9 +207,23 @@ def main():
                 "actor": "seed@localhost",
             }
         )
-        backdate(ORG_ID, checkout["checkoutId"], days_ago, 14)
-    print(f"seeded {len(loans)} active loans (two of them overdue)")
-    print("\nReady. Start the API with: make dev")
+        backdate(org_id, checkout["checkoutId"], days_ago, 14)
+    print(f"seeded {org_id}: {len(assets)} items, {len(members)} members, {len(loans)} loans")
+    return org
+
+
+def main():
+    recreate_table()
+    seed_branch(
+        ORG_ID,
+        "Kanchan Community Library",
+        CATALOGUE,
+        PEOPLE,
+        loans=[(0, 0, 20), (6, 1, 16), (8, 2, 13), (3, 0, 5), (10, 4, 1)],
+    )
+    seed_branch("makerspace", "Workshop tool room", WORKSHOP, WORKSHOP_PEOPLE, loans=[(0, 0, 3)])
+    print("\nSign in with branch ID `dev-branch` or `makerspace`. PIN 123456 (any PIN in AUTH_MODE=dev).")
+    print("Start the API with: make dev")
 
 
 if __name__ == "__main__":

@@ -24,12 +24,12 @@ output "api_url" {
 }
 
 output "dynamodb_table_name" {
-  description = "Single table holding the branch's data."
+  description = "Single table holding every desk. Rows are partitioned by ORG#{branchId}."
   value       = aws_dynamodb_table.main.name
 }
 
 output "desk_pin" {
-  description = "PIN used at the sign-in screen. Store this somewhere staff can see it."
+  description = "Bootstrap PIN for the default branch (var.org_id) until that desk sets its own PIN in Settings."
   value       = local.desk_pin
   sensitive   = true
 }

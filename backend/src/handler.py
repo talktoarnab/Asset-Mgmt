@@ -23,12 +23,12 @@ from domain.checkouts import (
     renew_checkout,
 )
 from domain.members import create_member, delete_member, get_member, list_members, set_open_loan_count, update_member
-from domain.orgs import ensure_org, update_org
+from domain.orgs import create_org, find_org, public_org, require_org, set_org_pin, update_org
 from domain.rules import evaluate_eligibility
 from domain import schemas
-from lib.auth import actor_label, auth_context_from, desk_staff, issue_session, pin_matches, require_role
+from lib.auth import actor_label, auth_context_from, desk_staff, issue_session, pin_matches_org, require_role
 from lib import env
-from lib.errors import HttpError, ValidationError, conflict, unauthorized
+from lib.errors import HttpError, ValidationError, conflict, not_found, unauthorized
 from lib.http import created, error_response, json_response, no_content, ok, parse_body
 from lib.router import Router
 from domain.types import stock_levels
@@ -43,27 +43,47 @@ def _query(ctx):
 
 def _login(ctx):
     parsed = parse_body(schemas.login, ctx.get("body"), ctx.get("isBase64Encoded"))
-    if not pin_matches(parsed["pin"]):
-        raise unauthorized("That PIN is not recognised.")
-    auth = desk_staff()
-    org = ensure_org(auth["orgId"], env.org_name())
-    return ok({"token": issue_session(auth), "user": auth, "org": org})
+    org = find_org(parsed["org"])
+    if not org and parsed["org"] == env.org_id():
+        org = require_org(parsed["org"])
+    if not org or not pin_matches_org(org, parsed["pin"]):
+        raise unauthorized("That branch or PIN is not recognised.")
+    auth = desk_staff(org["orgId"])
+    return ok({"token": issue_session(auth), "user": auth, "org": public_org(org)})
+
+
+def _create_org(ctx):
+    data = parse_body(schemas.org_create, ctx.get("body"), ctx.get("isBase64Encoded"))
+    org = create_org(data["slug"], data["name"], data["pin"])
+    auth = desk_staff(org["orgId"])
+    return created({"token": issue_session(auth), "user": auth, "org": public_org(org)})
+
+
+def _public_org(ctx):
+    org = find_org(ctx["params"]["orgId"].strip().lower())
+    if not org:
+        raise not_found("No desk matches that branch ID.")
+    return ok({"orgId": org["orgId"], "slug": org["orgId"], "name": org["name"]})
 
 
 def _me(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
-    return ok({"user": ctx["auth"], "org": org})
+    org = require_org(ctx["auth"]["orgId"])
+    return ok({"user": ctx["auth"], "org": public_org(org)})
 
 
 def _get_settings(ctx):
-    return ok(ensure_org(ctx["auth"]["orgId"], env.org_name()))
+    return ok(public_org(require_org(ctx["auth"]["orgId"])))
 
 
 def _patch_settings(ctx):
     require_role(ctx["auth"], "admin")
-    ensure_org(ctx["auth"]["orgId"], env.org_name())
+    require_org(ctx["auth"]["orgId"])
     patch = parse_body(schemas.settings, ctx.get("body"), ctx.get("isBase64Encoded"))
-    return ok(update_org(ctx["auth"]["orgId"], patch))
+    pin = patch.pop("pin", None)
+    org = update_org(ctx["auth"]["orgId"], patch) if patch else require_org(ctx["auth"]["orgId"])
+    if pin:
+        org = set_org_pin(ctx["auth"]["orgId"], pin)
+    return ok(public_org(org))
 
 
 def _list_members(ctx):
@@ -83,7 +103,7 @@ def _list_members(ctx):
 
 
 def _create_member(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     data = parse_body(schemas.member_create, ctx.get("body"), ctx.get("isBase64Encoded"))
     if not data.get("email"):
         data.pop("email", None)
@@ -96,7 +116,7 @@ def _get_member(ctx):
 
 
 def _patch_member(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     patch = parse_body(schemas.member_update, ctx.get("body"), ctx.get("isBase64Encoded"))
     if patch.get("email") == "":
         patch["email"] = ""
@@ -157,13 +177,13 @@ def _list_assets(ctx):
 
 
 def _create_asset(ctx):
-    ensure_org(ctx["auth"]["orgId"], env.org_name())
+    require_org(ctx["auth"]["orgId"])
     data = parse_body(schemas.asset_create, ctx.get("body"), ctx.get("isBase64Encoded"))
     return created(create_asset(ctx["auth"]["orgId"], data))
 
 
 def _bulk_assets(ctx):
-    ensure_org(ctx["auth"]["orgId"], env.org_name())
+    require_org(ctx["auth"]["orgId"])
     parsed = parse_body(schemas.asset_bulk, ctx.get("body"), ctx.get("isBase64Encoded"))
     results = []
     for row in parsed["assets"]:
@@ -215,7 +235,7 @@ def _delete_unit(ctx):
 
 
 def _scan(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     data = parse_body(schemas.scan, ctx.get("body"), ctx.get("isBase64Encoded"))
     org_id = ctx["auth"]["orgId"]
     asset, unit = resolve_scan(org_id, data["ref"])
@@ -268,7 +288,7 @@ def _list_checkouts(ctx):
 
 
 def _create_checkout(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     data = parse_body(schemas.checkout_create, ctx.get("body"), ctx.get("isBase64Encoded"))
     org_id = ctx["auth"]["orgId"]
     asset, unit = resolve_scan(org_id, data.get("unitRef") or data["assetRef"])
@@ -297,7 +317,7 @@ def _checkin_id(ctx):
 
 
 def _checkin_ref(ctx):
-    ensure_org(ctx["auth"]["orgId"], env.org_name())
+    require_org(ctx["auth"]["orgId"])
     data = parse_body(schemas.checkin_by_ref, ctx.get("body"), ctx.get("isBase64Encoded"))
     org_id = ctx["auth"]["orgId"]
     asset, unit = resolve_scan(org_id, data["assetRef"])
@@ -330,7 +350,7 @@ def _checkin_ref(ctx):
 
 
 def _renew(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     checkout = get_checkout(ctx["auth"]["orgId"], ctx["params"]["checkoutId"])
     return ok(renew_checkout(checkout, org, actor_label(ctx["auth"])))
 
@@ -343,7 +363,7 @@ def _lost(ctx):
 
 
 def _summary(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     org_id = ctx["auth"]["orgId"]
     return ok(
         build_summary(org, list_assets(org_id), list_members(org_id), list_open_loans(org_id), list_recent_checkouts(org_id, 500))
@@ -351,7 +371,7 @@ def _summary(ctx):
 
 
 def _report(ctx):
-    org = ensure_org(ctx["auth"]["orgId"], env.org_name())
+    org = require_org(ctx["auth"]["orgId"])
     org_id = ctx["auth"]["orgId"]
     return ok(
         build_report(org, list_assets(org_id), list_members(org_id), list_open_loans(org_id), list_recent_checkouts(org_id, 1000))
@@ -376,6 +396,8 @@ def _reconcile(ctx):
 
 
 router.post("/v1/auth/login", _login)
+router.post("/v1/orgs", _create_org)
+router.get("/v1/orgs/{orgId}", _public_org)
 router.get("/v1/me", _me)
 router.get("/v1/settings", _get_settings)
 router.patch("/v1/settings", _patch_settings)
@@ -405,14 +427,20 @@ router.get("/v1/analytics/summary", _summary)
 router.get("/v1/analytics/report", _report)
 router.post("/v1/maintenance/reconcile", _reconcile)
 
-PUBLIC_ROUTES = {"POST /v1/auth/login"}
+def _is_public(method: str, path: str) -> bool:
+    if f"{method} {path}" in {"POST /v1/auth/login", "POST /v1/orgs"}:
+        return True
+    if method == "GET" and path.startswith("/v1/orgs/"):
+        rest = path[len("/v1/orgs/") :]
+        return bool(rest) and "/" not in rest
+    return False
 
 
 def handler(event, context=None):
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method") or "GET"
     path = event.get("rawPath") or "/"
     try:
-        auth = desk_staff() if f"{method} {path}" in PUBLIC_ROUTES else auth_context_from(event)
+        auth = None if _is_public(method, path) else auth_context_from(event)
         return router.handle(
             {
                 "method": method,

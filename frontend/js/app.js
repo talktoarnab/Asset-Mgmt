@@ -1,4 +1,4 @@
-import { api, ApiError, getConfig, loadConfig, logout, readToken, writeToken } from './api.js';
+import { api, ApiError, getConfig, loadConfig, logout, readOrg, readToken, writeOrg, writeToken } from './api.js';
 import {
   STATUS_TONE,
   TIER_LIMITS,
@@ -157,7 +157,7 @@ function shellHtml() {
 
   return `<div class="app">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">${icon('loans', 17)}</span><span class="col"><span>${esc(branch)}</span><span class="brand-sub">ShelfKit</span></span></div>
+      <div class="brand"><span class="brand-mark">${icon('loans', 17)}</span><span class="col"><span>${esc(branch)}</span><span class="brand-sub">${esc(org()?.slug || org()?.orgId || 'ShelfKit')}</span></span></div>
       <nav>${items.map(link).join('')}<div class="nav-group-label">Insights</div>${secondary.map(link).join('')}</nav>
       <div class="sidebar-footer">
         ${avatar(session.me.user.name || 'Staff')}
@@ -372,37 +372,114 @@ function emptyMemberDraft() {
   return { name: '', phone: '', email: '', tier: 'standard', borrowLimit: '', status: 'active', membershipExpiresAt: '', notes: '' };
 }
 
+function slugify(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+}
+
 async function renderSignIn(root) {
   const config = getConfig();
-  root.innerHTML = `<div class="login-screen"><div class="card login-card">
-    <span class="brand-mark">${icon('loans', 22)}</span>
-    <h1>${esc(config.appName)}</h1>
-    <p class="muted small" style="margin-top:8px;margin-bottom:24px">Desk sign-in. A handheld scanner types barcodes into the desk screen after you unlock.</p>
-    <form class="stack" style="gap:14px" id="login-form">
-      ${field('Staff PIN', '<input name="pin" type="password" inputmode="numeric" autocomplete="current-password" autofocus>')}
-      ${btn('Unlock the desk', { variant: 'primary', size: 'lg', type: 'submit', block: true })}
-    </form>
-  </div></div>`;
-  const form = root.querySelector('#login-form');
-  const submit = form.querySelector('button[type="submit"]');
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const pin = new FormData(form).get('pin').trim();
-    if (!pin) return;
-    submit.disabled = true;
-    try {
-      const result = await api.login(pin);
-      writeToken(result.token);
-      await boot();
-    } catch (error) {
-      const err = form.querySelector('.error') || document.createElement('span');
-      err.className = 'error';
-      err.textContent = error.message;
-      form.querySelector('.field').appendChild(err);
-    } finally {
-      submit.disabled = false;
-    }
-  });
+  const fromHash = path().match(/^\/o\/([a-z][a-z0-9-]{2,31})$/i);
+  let mode = 'signin';
+  let orgSlug = (fromHash?.[1] || readOrg()).toLowerCase();
+  let orgName = '';
+  let slugTouched = Boolean(orgSlug);
+
+  function paint(errorMessage) {
+    root.innerHTML = `<div class="login-screen"><div class="card login-card">
+      <span class="brand-mark">${icon('loans', 22)}</span>
+      <h1>${esc(config.appName)}</h1>
+      <p class="muted small" style="margin-top:8px;margin-bottom:24px">${
+        mode === 'setup'
+          ? 'Open a desk for your library or tool room. Catalogue, members and loans stay on this branch.'
+          : 'Sign in to your branch. A handheld scanner types barcodes into the desk after you unlock.'
+      }</p>
+      <form class="stack" style="gap:14px;text-align:left" id="login-form">
+        ${
+          mode === 'setup'
+            ? `${field('Desk name', `<input name="name" value="${esc(orgName)}" placeholder="Kanchan Community Library" required autofocus>`)}
+               ${field('Branch ID', `<input name="org" value="${esc(orgSlug)}" placeholder="kanchan" autocapitalize="off" spellcheck="false" required>`, { hint: 'Staff type this at sign-in. Letters, numbers and dashes.' })}`
+            : field(
+                'Branch ID',
+                `<input name="org" value="${esc(orgSlug)}" placeholder="kanchan" autocapitalize="off" spellcheck="false" required autofocus>`,
+                { hint: orgName ? orgName : 'The short ID for this desk' },
+              )
+        }
+        ${field('Staff PIN', '<input name="pin" type="password" inputmode="numeric" autocomplete="current-password" required>')}
+        ${mode === 'setup' ? field('Confirm PIN', '<input name="pinConfirm" type="password" inputmode="numeric" autocomplete="new-password" required>') : ''}
+        ${errorMessage ? `<span class="error">${esc(errorMessage)}</span>` : ''}
+        ${btn(mode === 'setup' ? 'Create this desk' : 'Unlock the desk', { variant: 'primary', size: 'lg', type: 'submit', block: true })}
+      </form>
+      <p class="tiny muted" style="margin-top:18px">${
+        mode === 'setup'
+          ? `<button class="btn ghost sm" type="button" data-act="signin">Already have a desk? Sign in</button>`
+          : `<button class="btn ghost sm" type="button" data-act="setup">First time here? Open a desk</button>`
+      }</p>
+    </div></div>`;
+    const form = root.querySelector('#login-form');
+    const submit = form.querySelector('button[type="submit"]');
+    form.querySelector('[name="name"]')?.addEventListener('input', (event) => {
+      orgName = event.target.value;
+      if (!slugTouched) {
+        orgSlug = slugify(orgName);
+        const slugInput = form.querySelector('[name="org"]');
+        if (slugInput) slugInput.value = orgSlug;
+      }
+    });
+    form.querySelector('[name="org"]')?.addEventListener('input', (event) => {
+      orgSlug = event.target.value.trim().toLowerCase();
+      slugTouched = true;
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(form).entries());
+      const org = (data.org || '').trim().toLowerCase();
+      const pin = (data.pin || '').trim();
+      if (!org || !pin) return;
+      if (mode === 'setup') {
+        if (pin !== (data.pinConfirm || '').trim()) {
+          paint('The PIN and confirmation do not match.');
+          return;
+        }
+      }
+      submit.disabled = true;
+      try {
+        const result =
+          mode === 'setup'
+            ? await api.createOrg({ slug: org, name: data.name.trim(), pin })
+            : await api.login(org, pin);
+        writeToken(result.token);
+        writeOrg(result.org?.slug || result.org?.orgId || org);
+        location.hash = '#/';
+        await boot();
+      } catch (error) {
+        paint(error.message);
+      }
+    });
+    on(root, 'click', (event) => {
+      if (event.target.closest('[data-act="setup"]')) {
+        mode = 'setup';
+        paint();
+      }
+      if (event.target.closest('[data-act="signin"]')) {
+        mode = 'signin';
+        paint();
+      }
+    });
+  }
+
+  paint();
+  if (orgSlug && mode === 'signin') {
+    api.lookupOrg(orgSlug)
+      .then((found) => {
+        orgName = found.name;
+        paint();
+      })
+      .catch(() => {});
+  }
 }
 
 async function renderDashboard(view) {
@@ -1393,6 +1470,7 @@ async function renderSettings(view) {
       ${card(
         `<form id="settings-form" class="form-grid">
           ${field('Branch name', `<input name="name" value="${esc(branch.name)}">`)}
+          ${field('Branch ID', `<input value="${esc(branch.slug || branch.orgId)}" readonly>`, { hint: 'Staff use this ID at sign-in. It cannot be changed.' })}
           ${field('Timezone', select('timezone', branch.timezone, zones.map((zone) => ({ value: zone, label: zone.replace('_', ' ') }))), { hint: 'Due dates land at the end of the day here' })}
           ${field('Default country code', `<input name="defaultCountryCode" value="${esc(branch.defaultCountryCode)}" placeholder="+91">`, { hint: 'Applied to phone numbers typed without one' })}
         </form>`,
@@ -1407,6 +1485,13 @@ async function renderSettings(view) {
         { title: 'Lending rules' },
       )}
       ${card(
+        `<div class="form-grid">
+          ${field('New staff PIN', `<input form="settings-form" name="pin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="Leave blank to keep the current PIN">`)}
+          ${field('Confirm new PIN', `<input form="settings-form" name="pinConfirm" type="password" inputmode="numeric" autocomplete="new-password">`)}
+        </div>`,
+        { title: 'Desk PIN' },
+      )}
+      ${card(
         `<p class="small muted" style="margin-bottom:12px">Each member carries a counter of how many items they currently hold, which is what enforces borrowing limits. If records were edited outside the app, recount it from the loans themselves.</p>${btn('Recount open loans', { extra: 'data-act="reconcile"' })}`,
         { title: 'Maintenance' },
       )}
@@ -1415,15 +1500,21 @@ async function renderSettings(view) {
     if (event.target.closest('[data-act="save"]')) {
       const form = view.querySelector('#settings-form');
       const data = Object.fromEntries(new FormData(form).entries());
+      if ((data.pin || '') !== (data.pinConfirm || '')) {
+        toast('The new PIN and confirmation do not match.', 'error');
+        return;
+      }
       try {
-        await api.updateSettings({
+        const payload = {
           name: data.name.trim(),
           timezone: data.timezone,
           defaultCountryCode: data.defaultCountryCode.trim(),
           defaultLoanDays: Number(data.defaultLoanDays),
           maxRenewals: Number(data.maxRenewals),
           renewalDays: Number(data.renewalDays),
-        });
+        };
+        if (data.pin?.trim()) payload.pin = data.pin.trim();
+        await api.updateSettings(payload);
         toast('Branch settings saved.', 'success');
         session.me = await api.me();
         await boot();
@@ -1487,6 +1578,7 @@ async function boot() {
   app.innerHTML = `<div class="login-screen"><div class="col center" style="align-items:center;gap:12px"><span class="brand-mark" style="width:44px;height:44px;border-radius:13px">${icon('loans', 20)}</span><span class="muted small">Loading your branch…</span></div></div>`;
   try {
     session.me = await api.me();
+    writeOrg(session.me.org?.slug || session.me.org?.orgId);
     await refreshCounts();
     await route();
   } catch (error) {

@@ -1160,9 +1160,13 @@ tbody tr.clickable:hover {
 }
 
 .login-card {
-  width: min(400px, 100%);
+  width: min(440px, 100%);
   text-align: center;
   padding: 32px 28px;
+}
+
+.login-card form {
+  text-align: left;
 }
 
 .login-card .brand-mark {

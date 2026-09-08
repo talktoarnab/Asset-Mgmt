@@ -2,12 +2,14 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 
 from lib import env
 from lib.errors import forbidden, unauthorized
 
 SESSION_TTL_SECONDS = 12 * 60 * 60
+PIN_HASH_ROUNDS = 80_000
 
 
 def _b64url(data: bytes) -> str:
@@ -19,6 +21,28 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
+def hash_pin(pin: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, PIN_HASH_ROUNDS)
+    return f"pbkdf2${PIN_HASH_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def verify_pin(presented: str, stored: str) -> bool:
+    try:
+        scheme, rounds_s, salt_hex, digest_hex = stored.split("$", 3)
+        if scheme != "pbkdf2":
+            return False
+        rounds = int(rounds_s)
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except (ValueError, TypeError):
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", presented.encode("utf-8"), salt, rounds)
+    if len(digest) != len(expected):
+        return False
+    return hmac.compare_digest(digest, expected)
+
+
 def pin_matches(presented: str) -> bool:
     if env.auth_mode() == "dev":
         return len(presented) > 0
@@ -28,6 +52,17 @@ def pin_matches(presented: str) -> bool:
     if len(a) != len(b):
         return False
     return hmac.compare_digest(a, b)
+
+
+def pin_matches_org(org: dict, presented: str) -> bool:
+    if env.auth_mode() == "dev":
+        return len(presented) > 0
+    stored = org.get("pinHash")
+    if stored:
+        return verify_pin(presented, stored)
+    if org.get("orgId") == env.org_id():
+        return pin_matches(presented)
+    return False
 
 
 def issue_session(auth: dict) -> str:
@@ -83,9 +118,9 @@ def bearer_token(event: dict) -> str | None:
     return None
 
 
-def desk_staff() -> dict:
+def desk_staff(org_id: str | None = None) -> dict:
     return {
-        "orgId": env.org_id(),
+        "orgId": org_id or env.org_id(),
         "userId": "desk",
         "email": "",
         "name": "Desk",

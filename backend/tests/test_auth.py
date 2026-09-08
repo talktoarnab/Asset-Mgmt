@@ -1,6 +1,6 @@
 import os
 
-from lib.auth import issue_session, pin_matches, verify_session
+from lib.auth import hash_pin, issue_session, pin_matches, pin_matches_org, verify_pin, verify_session
 from lib.errors import HttpError
 import pytest
 
@@ -27,3 +27,21 @@ def test_rejects_tampered_token():
     token = issue_session({"orgId": "main", "userId": "desk", "email": "", "name": "Desk", "roles": ["staff"]})
     with pytest.raises(HttpError):
         verify_session(f"{token}x")
+
+
+def test_hashed_pin_round_trip():
+    os.environ["AUTH_MODE"] = "pin"
+    hashed = hash_pin("246810")
+    assert verify_pin("246810", hashed) is True
+    assert verify_pin("000000", hashed) is False
+    org = {"orgId": "kanchan", "pinHash": hashed}
+    assert pin_matches_org(org, "246810") is True
+    assert pin_matches_org(org, "000000") is False
+
+
+def test_bootstrap_pin_only_for_default_org():
+    os.environ["AUTH_MODE"] = "pin"
+    os.environ["ORG_ID"] = "main"
+    os.environ["DESK_PIN"] = "246810"
+    assert pin_matches_org({"orgId": "main"}, "246810") is True
+    assert pin_matches_org({"orgId": "other"}, "246810") is False

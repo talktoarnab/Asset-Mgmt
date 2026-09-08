@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'shelfkit.token';
+const ORG_KEY = 'shelfkit.org';
 
 const FALLBACK = { appName: 'ShelfKit', apiBaseUrl: '' };
 
@@ -101,8 +102,18 @@ async function request(path, options = {}) {
   return payload;
 }
 
+export function readOrg() {
+  return localStorage.getItem(ORG_KEY) ?? '';
+}
+
+export function writeOrg(org) {
+  if (org) localStorage.setItem(ORG_KEY, org);
+}
+
 export const api = {
-  login: (pin) => request('/v1/auth/login', { method: 'POST', body: { pin }, auth: false }),
+  login: (org, pin) => request('/v1/auth/login', { method: 'POST', body: { org, pin }, auth: false }),
+  lookupOrg: (org) => request(`/v1/orgs/${encodeURIComponent(org)}`, { auth: false }),
+  createOrg: (body) => request('/v1/orgs', { method: 'POST', body, auth: false }),
   me: () => request('/v1/me'),
   updateSettings: (patch) => request('/v1/settings', { method: 'PATCH', body: patch }),
 

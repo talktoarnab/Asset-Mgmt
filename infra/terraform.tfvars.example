@@ -4,6 +4,8 @@ aws_region  = "eu-north-1"
 
 org_id   = "main"
 org_name = "My Library"
+# Other desks are opened from the sign-in screen (branch ID + PIN).
+# org_id is only the first branch, created on first sign-in if the table is empty.
 
 enable_cloudfront = true
 

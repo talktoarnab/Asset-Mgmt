@@ -320,14 +320,44 @@ def settings(data: dict) -> dict:
         out["maxOverdueReminders"] = _num(data, "maxOverdueReminders", errors, integer=True, min_v=0, max_v=20)
     if "contactPhone" in data:
         out["contactPhone"] = _opt_str(data, "contactPhone", errors, max_len=24)
+    if "pin" in data and data["pin"] not in (None, ""):
+        pin = _str(data, "pin", errors, required=True, min_len=4, max_len=32)
+        if pin is not None and (len(pin) < 4 or len(pin) > 32):
+            errors.append(_issue("pin", "PIN must be 4–32 characters"))
+        out["pin"] = pin
     _raise(errors)
     return {k: v for k, v in out.items() if v is not None}
 
 
 def login(data: dict) -> dict:
     errors = []
+    org = _opt_str(data, "org", errors, max_len=32) or _opt_str(data, "orgId", errors, max_len=32)
+    if not org:
+        errors.append(_issue("org", "Required"))
+    elif not re.match(r"^[a-z][a-z0-9-]{2,31}$", org.lower()):
+        errors.append(_issue("org", "Use a short ID like kanchan or tool-room"))
     pin = _str(data, "pin", errors, required=True, min_len=4, max_len=32)
     if pin is not None and (len(pin) < 4 or len(pin) > 32):
         errors.append(_issue("pin", "PIN must be 4–32 characters"))
     _raise(errors)
-    return {"pin": pin}
+    return {"org": org.lower(), "pin": pin}
+
+
+def org_create(data: dict) -> dict:
+    errors = []
+    slug = _opt_str(data, "slug", errors, max_len=32) or _opt_str(data, "org", errors, max_len=32) or _opt_str(
+        data, "orgId", errors, max_len=32
+    )
+    if not slug:
+        errors.append(_issue("slug", "Required"))
+    elif not re.match(r"^[a-z][a-z0-9-]{2,31}$", slug.lower()):
+        errors.append(_issue("slug", "Use letters, numbers and dashes, starting with a letter"))
+    out = {
+        "slug": slug.lower() if slug else slug,
+        "name": _str(data, "name", errors, required=True, max_len=120),
+        "pin": _str(data, "pin", errors, required=True, min_len=4, max_len=32),
+    }
+    if out.get("pin") is not None and (len(out["pin"]) < 4 or len(out["pin"]) > 32):
+        errors.append(_issue("pin", "PIN must be 4–32 characters"))
+    _raise(errors)
+    return out

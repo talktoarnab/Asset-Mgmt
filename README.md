@@ -28,7 +28,7 @@ fallback.
 | App | CloudFront → S3 | Static HTML, CSS, JS. No build step |
 | API | CloudFront `/v1` → API Gateway HTTP API → Lambda | Python 3.13, arm64. Desk PIN in `Authorization: Bearer` |
 | Data | DynamoDB | On-demand, PITR, one table per environment |
-| Auth | Desk PIN | HMAC session token. No Cognito |
+| Auth | Desk PIN per branch | HMAC session token carries `orgId`. No Cognito |
 
 ## Repository layout
 
@@ -51,8 +51,9 @@ make seed                     # demo catalogue, members, and loans
 make dev                      # API :4000, app :5173
 ```
 
-Local auth is open (`AUTH_MODE=dev`). Any PIN on the sign-in screen works. The static server
-proxies `/v1` to the local API, same as CloudFront does in AWS.
+Local auth is open (`AUTH_MODE=dev`). Any PIN on the sign-in screen works. Seed creates two
+desks: `dev-branch` (Kanchan Community Library) and `makerspace` (Workshop tool room). The
+static server proxies `/v1` to the local API, same as CloudFront does in AWS.
 
 ## Deploying to AWS
 
@@ -124,6 +125,20 @@ terraform output -raw app_url
 ```
 
 Open that URL and sign in with the desk PIN.
+
+## Many desks, one deploy
+
+One ShelfKit stack can host any number of libraries or tool rooms. Each desk has its own
+branch ID (`kanchan`, `makerspace`, …), staff PIN, catalogue, members and loans. Data is
+partitioned by `ORG#{branchId}` in DynamoDB, so one tenant cannot see another.
+
+1. On the sign-in screen, choose **Open a desk**, pick a name, a short branch ID, and a PIN.
+2. Staff later unlock with that **branch ID + PIN**.
+3. Settings can rotate the PIN for that desk only.
+
+The Terraform `org_id` / `desk_pin` values still bootstrap the first branch on an empty table
+(default `main`). After that, new desks are created from the app — you do not need another
+Lambda or CloudFront distribution.
 
 ## Handheld scanning
 
