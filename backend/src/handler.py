@@ -1,7 +1,17 @@
 from datetime import datetime, timezone
 
 from domain.analytics import build_report, build_summary
-from domain.assets import create_asset, delete_asset, get_asset, list_assets, resolve_asset_ref, update_asset
+from domain.assets import (
+    add_units_to_asset,
+    create_asset,
+    delete_asset,
+    get_asset_detail,
+    list_assets,
+    patch_unit_on_asset,
+    remove_unit_from_asset,
+    resolve_scan,
+    update_asset,
+)
 from domain.checkouts import (
     checkout_asset,
     close_checkout,
@@ -22,6 +32,7 @@ from lib.errors import HttpError, ValidationError, conflict, unauthorized
 from lib.http import created, error_response, json_response, no_content, ok, parse_body
 from lib.router import Router
 from domain.types import stock_levels
+from domain.units import find_unit_by_serial, get_unit, list_units
 
 router = Router()
 
@@ -109,6 +120,8 @@ def _list_assets(ctx):
     term = (_query(ctx).get("q") or "").strip().lower()
     status = (_query(ctx).get("status") or "").strip()
     category = (_query(ctx).get("category") or "").strip()
+    serial_hit = find_unit_by_serial(ctx["auth"]["orgId"], term) if term else None
+    serial_asset_id = serial_hit["assetId"] if serial_hit else None
     filtered = []
     for asset in assets:
         if status:
@@ -134,9 +147,12 @@ def _list_assets(ctx):
                     asset.get("location") or "",
                 ]
             ).lower()
-            if term not in blob:
+            if term not in blob and asset.get("assetId") != serial_asset_id:
                 continue
         filtered.append(asset)
+    if "units" in (_query(ctx).get("include") or "").split(","):
+        for asset in filtered:
+            asset["units"] = list_units(ctx["auth"]["orgId"], asset["assetId"])
     return ok({"items": filtered, "total": len(filtered)})
 
 
@@ -165,7 +181,7 @@ def _open_for_asset(org_id, asset):
 
 def _get_asset(ctx):
     org_id = ctx["auth"]["orgId"]
-    asset = get_asset(org_id, ctx["params"]["assetId"])
+    asset = get_asset_detail(org_id, ctx["params"]["assetId"])
     loans, active = _open_for_asset(org_id, asset)
     return ok({"asset": asset, "activeCheckout": active, "openCheckouts": loans})
 
@@ -181,22 +197,55 @@ def _delete_asset(ctx):
     return no_content()
 
 
+def _add_units(ctx):
+    data = parse_body(schemas.units_add, ctx.get("body"), ctx.get("isBase64Encoded"))
+    asset = add_units_to_asset(
+        ctx["auth"]["orgId"], ctx["params"]["assetId"], data["count"], data.get("serials")
+    )
+    return created(asset)
+
+
+def _patch_unit(ctx):
+    patch = parse_body(schemas.unit_update, ctx.get("body"), ctx.get("isBase64Encoded"))
+    return ok(patch_unit_on_asset(ctx["auth"]["orgId"], ctx["params"]["assetId"], ctx["params"]["unitId"], patch))
+
+
+def _delete_unit(ctx):
+    return ok(remove_unit_from_asset(ctx["auth"]["orgId"], ctx["params"]["assetId"], ctx["params"]["unitId"]))
+
+
 def _scan(ctx):
     org = ensure_org(ctx["auth"]["orgId"], env.org_name())
     data = parse_body(schemas.scan, ctx.get("body"), ctx.get("isBase64Encoded"))
-    asset = resolve_asset_ref(ctx["auth"]["orgId"], data["ref"])
-    loans, active = _open_for_asset(ctx["auth"]["orgId"], asset)
-    member = get_member(ctx["auth"]["orgId"], data["memberId"]) if data.get("memberId") else None
-    blockers = evaluate_eligibility(org, member, asset, datetime.now(timezone.utc)) if member else []
+    org_id = ctx["auth"]["orgId"]
+    asset, unit = resolve_scan(org_id, data["ref"])
+    asset = get_asset_detail(org_id, asset["assetId"])
+    loans, active = _open_for_asset(org_id, asset)
+    if unit:
+        unit = next((item for item in asset.get("units") or [] if item["unitId"] == unit["unitId"]), unit)
+        unit_loans = [loan for loan in loans if loan.get("unitId") == unit["unitId"]]
+        active = unit_loans[0] if unit_loans else None
+    member = get_member(org_id, data["memberId"]) if data.get("memberId") else None
+    blockers = evaluate_eligibility(org, member, asset, datetime.now(timezone.utc), unit=unit) if member else []
     _, on_hand = stock_levels(asset)
+    if unit:
+        if unit.get("status") == "checked_out":
+            suggested = "checkin"
+        elif unit.get("status") == "available":
+            suggested = "checkout"
+        else:
+            suggested = "none"
+    else:
+        suggested = "checkout" if on_hand > 0 else "checkin" if loans else "none"
     return ok(
         {
             "asset": asset,
+            "unit": unit,
             "activeCheckout": active,
             "openCheckouts": loans,
             "member": member,
             "blockers": blockers,
-            "suggestedAction": "checkout" if on_hand > 0 else "checkin" if loans else "none",
+            "suggestedAction": suggested,
         }
     )
 
@@ -221,19 +270,23 @@ def _list_checkouts(ctx):
 def _create_checkout(ctx):
     org = ensure_org(ctx["auth"]["orgId"], env.org_name())
     data = parse_body(schemas.checkout_create, ctx.get("body"), ctx.get("isBase64Encoded"))
-    asset = resolve_asset_ref(ctx["auth"]["orgId"], data["assetRef"])
-    member = get_member(ctx["auth"]["orgId"], data["memberId"])
+    org_id = ctx["auth"]["orgId"]
+    asset, unit = resolve_scan(org_id, data.get("unitRef") or data["assetRef"])
+    if data.get("unitId"):
+        unit = get_unit(org_id, asset["assetId"], data["unitId"])
+    member = get_member(org_id, data["memberId"])
     checkout = checkout_asset(
         {
             "org": org,
             "member": member,
             "asset": asset,
+            "unit": unit,
             "loanDays": data.get("loanDays"),
             "notes": data.get("notes"),
             "actor": actor_label(ctx["auth"]),
         }
     )
-    return created({"checkout": checkout, "asset": get_asset(ctx["auth"]["orgId"], asset["assetId"]), "member": member})
+    return created({"checkout": checkout, "asset": get_asset_detail(org_id, asset["assetId"]), "member": member})
 
 
 def _checkin_id(ctx):
@@ -246,12 +299,26 @@ def _checkin_id(ctx):
 def _checkin_ref(ctx):
     ensure_org(ctx["auth"]["orgId"], env.org_name())
     data = parse_body(schemas.checkin_by_ref, ctx.get("body"), ctx.get("isBase64Encoded"))
-    asset = resolve_asset_ref(ctx["auth"]["orgId"], data["assetRef"])
-    loans, active = _open_for_asset(ctx["auth"]["orgId"], asset)
-    if not active:
-        raise conflict("NOT_ON_LOAN", f'"{asset["title"]}" is not currently checked out, so there is nothing to return.')
+    org_id = ctx["auth"]["orgId"]
+    asset, unit = resolve_scan(org_id, data["assetRef"])
+    loans, active = _open_for_asset(org_id, asset)
+    if unit:
+        match = next((loan for loan in loans if loan.get("unitId") == unit["unitId"]), None)
+        if not match:
+            raise conflict(
+                "NOT_ON_LOAN",
+                f'{unit["serial"]} is not currently checked out, so there is nothing to return.',
+            )
+        target = match
+    else:
+        if not active:
+            raise conflict(
+                "NOT_ON_LOAN",
+                f'"{asset["title"]}" is not currently checked out, so there is nothing to return.',
+            )
+        target = loans[0]
     closed = close_checkout(
-        loans[0],
+        target,
         {
             "actor": actor_label(ctx["auth"]),
             "outcome": "returned",
@@ -259,7 +326,7 @@ def _checkin_ref(ctx):
             "notes": data.get("notes"),
         },
     )
-    return ok({"checkout": closed, "asset": get_asset(ctx["auth"]["orgId"], asset["assetId"])})
+    return ok({"checkout": closed, "asset": get_asset_detail(org_id, asset["assetId"])})
 
 
 def _renew(ctx):
@@ -324,6 +391,9 @@ router.post("/v1/assets/bulk", _bulk_assets)
 router.get("/v1/assets/{assetId}", _get_asset)
 router.patch("/v1/assets/{assetId}", _patch_asset)
 router.delete("/v1/assets/{assetId}", _delete_asset)
+router.post("/v1/assets/{assetId}/units", _add_units)
+router.patch("/v1/assets/{assetId}/units/{unitId}", _patch_unit)
+router.delete("/v1/assets/{assetId}/units/{unitId}", _delete_unit)
 router.post("/v1/scan", _scan)
 router.get("/v1/checkouts", _list_checkouts)
 router.post("/v1/checkouts", _create_checkout)

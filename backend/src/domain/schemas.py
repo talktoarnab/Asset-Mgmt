@@ -146,7 +146,7 @@ def asset_create(data: dict) -> dict:
         "condition": _opt_str(data, "condition", errors, max_len=40),
         "replacementCost": _num(data, "replacementCost", errors, min_v=0, max_v=10_000_000),
         "status": _enum(data, "status", ASSET_STATUSES, errors),
-        "stock": _num(data, "stock", errors, integer=True, min_v=1, max_v=100_000),
+        "stock": _num(data, "stock", errors, integer=True, min_v=1, max_v=200),
     }
     tags = data.get("tags")
     if tags is not None:
@@ -171,7 +171,7 @@ def asset_update(data: dict) -> dict:
         ("condition", lambda: _opt_str(data, "condition", errors, max_len=40)),
         ("replacementCost", lambda: _num(data, "replacementCost", errors, min_v=0, max_v=10_000_000)),
         ("status", lambda: _enum(data, "status", ASSET_STATUSES, errors)),
-        ("stock", lambda: _num(data, "stock", errors, integer=True, min_v=1, max_v=100_000)),
+        ("stock", lambda: _num(data, "stock", errors, integer=True, min_v=1, max_v=200)),
     ]
     for key, fn in mapping:
         if key in data:
@@ -201,9 +201,58 @@ def checkout_create(data: dict) -> dict:
         "memberId": _str(data, "memberId", errors, required=True, max_len=64),
         "loanDays": _num(data, "loanDays", errors, integer=True, min_v=1, max_v=365),
         "notes": _opt_str(data, "notes", errors, max_len=500),
+        "unitId": _opt_str(data, "unitId", errors, max_len=64),
+        "unitRef": _opt_str(data, "unitRef", errors, max_len=32),
     }
     _raise(errors)
     return {k: v for k, v in out.items() if v is not None}
+
+
+def units_add(data: dict) -> dict:
+    errors = []
+    serials = data.get("serials")
+    parsed_serials = None
+    if serials is not None:
+        if not isinstance(serials, list) or not serials:
+            errors.append(_issue("serials", "Provide a list of serials"))
+        else:
+            parsed_serials = []
+            for serial in serials:
+                value = str(serial).strip().upper()
+                if not re.match(r"^[A-Za-z0-9-]{3,32}$", value):
+                    errors.append(_issue("serials", "Use letters, numbers and dashes only"))
+                    break
+                parsed_serials.append(value)
+    count = _num(data, "count", errors, integer=True, min_v=1, max_v=50)
+    if count is None and parsed_serials:
+        count = len(parsed_serials)
+    if count is None:
+        errors.append(_issue("count", "Required"))
+    if parsed_serials and count is not None and len(parsed_serials) > count:
+        parsed_serials = parsed_serials[:count]
+    _raise(errors)
+    out = {"count": count}
+    if parsed_serials:
+        out["serials"] = parsed_serials
+    return out
+
+
+def unit_update(data: dict) -> dict:
+    errors = []
+    out = {}
+    if "serial" in data:
+        serial = _str(data, "serial", errors, required=True, max_len=32)
+        if serial and not re.match(r"^[A-Za-z0-9-]{3,32}$", serial):
+            errors.append(_issue("serial", "Use letters, numbers and dashes only"))
+        out["serial"] = serial.upper() if serial else serial
+    if "status" in data:
+        out["status"] = _enum(data, "status", {"available", "lost", "maintenance", "retired"}, errors)
+    if "condition" in data:
+        out["condition"] = _opt_str(data, "condition", errors, max_len=40)
+    if not out:
+        errors.append(_issue("", "Nothing to update"))
+    _raise(errors)
+    return out
 
 
 def checkin(data: dict) -> dict:

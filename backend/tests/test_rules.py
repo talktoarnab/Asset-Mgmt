@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from domain.rules import can_renew, compute_due_at, evaluate_eligibility, is_overdue, select_reminders
-from factories import make_asset, make_checkout, make_member, make_org
+from factories import make_asset, make_checkout, make_member, make_org, make_unit
 
 now = datetime(2026, 3, 10, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -37,6 +37,18 @@ def test_blocks_when_out_of_stock():
     )
     assert blockers[0]["code"] == "ASSET_UNAVAILABLE"
     assert "out of stock" in blockers[0]["message"]
+
+
+def test_blocks_when_unit_is_not_on_the_shelf():
+    blockers = evaluate_eligibility(
+        make_org(),
+        make_member(),
+        make_asset(stock=2, available=1),
+        now,
+        unit=make_unit(status="checked_out", serial="BK-ABC123-002"),
+    )
+    assert blockers[0]["code"] == "ASSET_UNAVAILABLE"
+    assert "BK-ABC123-002" in blockers[0]["message"]
 
 
 def test_reports_every_problem():

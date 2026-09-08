@@ -119,6 +119,10 @@ export const api = {
   createAssets: (assets) => request('/v1/assets/bulk', { method: 'POST', body: { assets } }),
   updateAsset: (assetId, body) => request(`/v1/assets/${assetId}`, { method: 'PATCH', body }),
   deleteAsset: (assetId) => request(`/v1/assets/${assetId}`, { method: 'DELETE' }),
+  addUnits: (assetId, body) => request(`/v1/assets/${assetId}/units`, { method: 'POST', body }),
+  updateUnit: (assetId, unitId, body) =>
+    request(`/v1/assets/${assetId}/units/${unitId}`, { method: 'PATCH', body }),
+  deleteUnit: (assetId, unitId) => request(`/v1/assets/${assetId}/units/${unitId}`, { method: 'DELETE' }),
 
   scan: (ref, memberId) => request('/v1/scan', { method: 'POST', body: { ref, memberId } }),
 

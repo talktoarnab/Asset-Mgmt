@@ -1,12 +1,13 @@
 # ShelfKit — Micro-Library & Asset Checkout
 
 Lending desk for community libraries, coaching-centre resource rooms, co-working tool libraries,
-and small office asset rooms. Staff sign in with a PIN, scan a printed label with a **handheld
-scanner** (or type the code), pick a borrower, and the loan is logged.
+and small office asset rooms. Staff sign in with a PIN, scan a printed **unit label** with a
+handheld scanner (or type the serial), pick a borrower, and the loan is logged against that
+specific copy — the same way a store or warehouse tracks stock.
 
-Camera scanning is not wired up yet. The desk field is a keyboard wedge, which is what USB and
-Bluetooth scanners already do. The `/v1/scan` lookup stays so a camera can be plugged in later
-without changing checkout.
+Each catalogue item is a SKU. Each physical copy under it gets its own ID (`SKU-001`, `SKU-002`,
+…). Camera scanning is not wired up yet. The desk field is a keyboard wedge, which is what USB
+and Bluetooth scanners already do.
 
 ## Architecture
 
@@ -126,10 +127,11 @@ Open that URL and sign in with the desk PIN.
 
 ## Handheld scanning
 
-1. Print labels from **Catalogue → Labels**. Each QR encodes the item’s short code.
+1. Print labels from **Catalogue → Labels**. Each QR encodes that copy’s unit serial (`SKU-001`).
 2. Plug in a USB or Bluetooth scanner. It behaves like a keyboard.
-3. Open **Desk**, leave the code field focused, scan. Enter submits and looks the item up.
-4. Check it out to a member, or check it in if it is already on loan.
+3. Open **Desk**, leave the code field focused, scan. Enter submits and looks that unit up.
+4. Check that copy out to a member, or check it in if it is already on loan. Scanning the SKU
+   (without a unit suffix) lists the copies on the shelf so you can pick one.
 
 ## CI/CD
 

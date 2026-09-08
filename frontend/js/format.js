@@ -92,6 +92,15 @@ export function stockBadge(asset) {
   return { text: `${available} of ${stock} in stock`, tone: 'positive' };
 }
 
+export function unitBadge(unit) {
+  const status = unit?.status ?? 'available';
+  return { text: titleCase(status), tone: STATUS_TONE[status] ?? 'neutral' };
+}
+
+export function loanCode(loan) {
+  return loan?.unitSerial || loan?.assetCode || '';
+}
+
 export const STATUS_TONE = {
   available: 'positive',
   checked_out: 'info',

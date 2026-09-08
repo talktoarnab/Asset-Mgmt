@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-from domain.assets import persist_stock_fields
+from domain.assets import ensure_units_for_asset, persist_stock_fields
 from domain import keys
 from domain.rules import can_renew, compute_due_at, evaluate_eligibility
 from domain.types import borrow_limit_for
+from domain.units import first_available_unit
 from lib.ddb import client, drop_none, query_all, serialize_item, table, table_name, to_entity
 from lib.errors import conflict, not_found, unprocessable
 from lib.ids import new_id
@@ -33,10 +34,17 @@ def _checkout_item(checkout: dict) -> dict:
     )
 
 
-def _explain_cancellation(error, member, asset):
+def _explain_cancellation(error, member, asset, unit=None):
     reasons = error.response.get("CancellationReasons") or []
-    asset_reason = reasons[1] if len(reasons) > 1 else {}
-    member_reason = reasons[2] if len(reasons) > 2 else {}
+    unit_reason = reasons[1] if len(reasons) > 1 else {}
+    asset_reason = reasons[2] if len(reasons) > 2 else {}
+    member_reason = reasons[3] if len(reasons) > 3 else {}
+    if unit_reason.get("Code") == "ConditionalCheckFailed":
+        serial = (unit or {}).get("serial") or "That unit"
+        raise conflict(
+            "ASSET_UNAVAILABLE",
+            f"{serial} is not on the shelf. Refresh and try again.",
+        )
     if asset_reason.get("Code") == "ConditionalCheckFailed":
         raise conflict(
             "ASSET_UNAVAILABLE",
@@ -51,15 +59,26 @@ def _explain_cancellation(error, member, asset):
 
 
 def checkout_asset(request: dict) -> dict:
-    org, member, asset, actor = request["org"], request["member"], request["asset"], request["actor"]
+    org, member, actor = request["org"], request["member"], request["actor"]
     now = request.get("now") or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
 
-    blockers = evaluate_eligibility(org, member, asset, now)
+    persist_stock_fields(request["asset"])
+    asset = ensure_units_for_asset(request["asset"])
+    unit = request.get("unit")
+    if not unit:
+        unit = first_available_unit(org["orgId"], asset["assetId"])
+    if not unit:
+        raise unprocessable(
+            "CHECKOUT_BLOCKED",
+            f'"{asset["title"]}" is out of stock.',
+            {"blockers": [{"code": "ASSET_UNAVAILABLE", "message": f'"{asset["title"]}" is out of stock.'}]},
+        )
+
+    blockers = evaluate_eligibility(org, member, asset, now, unit=unit)
     if blockers:
         raise unprocessable("CHECKOUT_BLOCKED", blockers[0]["message"], {"blockers": blockers})
-    persist_stock_fields(asset)
 
     loan_days = request.get("loanDays") or org["defaultLoanDays"]
     checkout = drop_none(
@@ -69,6 +88,8 @@ def checkout_asset(request: dict) -> dict:
             "assetId": asset["assetId"],
             "assetCode": asset["code"],
             "assetTitle": asset["title"],
+            "unitId": unit["unitId"],
+            "unitSerial": unit["serial"],
             "memberId": member["memberId"],
             "memberName": member["name"],
             "memberPhone": member["phone"],
@@ -91,6 +112,31 @@ def checkout_asset(request: dict) -> dict:
                         "TableName": table_name(),
                         "Item": serialize_item(_checkout_item(checkout)),
                         "ConditionExpression": "attribute_not_exists(SK)",
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": table_name(),
+                        "Key": serialize_item(
+                            {
+                                "PK": keys.pk(org["orgId"]),
+                                "SK": keys.sk_unit(asset["assetId"], unit["unitId"]),
+                            }
+                        ),
+                        "UpdateExpression": (
+                            "SET #status = :out, currentCheckoutId = :cid, borrowerName = :borrower, updatedAt = :now"
+                        ),
+                        "ConditionExpression": "attribute_exists(SK) AND #status = :available",
+                        "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": serialize_item(
+                            {
+                                ":out": "checked_out",
+                                ":available": "available",
+                                ":cid": checkout["checkoutId"],
+                                ":borrower": member["name"],
+                                ":now": checkout["checkedOutAt"],
+                            }
+                        ),
                     }
                 },
                 {
@@ -134,7 +180,7 @@ def checkout_asset(request: dict) -> dict:
         )
     except ClientError as error:
         if error.response["Error"]["Code"] == "TransactionCanceledException":
-            _explain_cancellation(error, member, asset)
+            _explain_cancellation(error, member, asset, unit)
         raise
     return checkout
 
@@ -170,30 +216,68 @@ def close_checkout(checkout: dict, options: dict) -> dict:
             "ConditionExpression": "attribute_exists(SK)",
             "ExpressionAttributeValues": serialize_item({":now": now, ":one": 1}),
         }
+        unit_values = serialize_item(
+            {
+                ":available": "available",
+                ":out": "checked_out",
+                ":now": now,
+            }
+        )
+        unit_update = {
+            "UpdateExpression": "SET #status = :available, updatedAt = :now REMOVE currentCheckoutId, borrowerName",
+            "ConditionExpression": "attribute_exists(SK) AND #status = :out",
+            "ExpressionAttributeNames": {"#status": "status"},
+            "ExpressionAttributeValues": unit_values,
+        }
     else:
         asset_update = {
             "UpdateExpression": "SET updatedAt = :now ADD stock :minusOne",
             "ConditionExpression": "attribute_exists(SK) AND stock > :zero",
             "ExpressionAttributeValues": serialize_item({":now": now, ":minusOne": -1, ":zero": 0}),
         }
+        unit_update = {
+            "UpdateExpression": "SET #status = :lost, updatedAt = :now REMOVE currentCheckoutId, borrowerName",
+            "ConditionExpression": "attribute_exists(SK) AND #status = :out",
+            "ExpressionAttributeNames": {"#status": "status"},
+            "ExpressionAttributeValues": serialize_item(
+                {":lost": "lost", ":out": "checked_out", ":now": now}
+            ),
+        }
 
-    client().transact_write_items(
-        TransactItems=[
+    items = [
+        {
+            "Update": {
+                "TableName": table_name(),
+                "Key": serialize_item(
+                    {"PK": keys.pk(checkout["orgId"]), "SK": keys.sk_checkout(checkout["checkoutId"])}
+                ),
+                "UpdateExpression": (
+                    f"SET #status = :status, returnedAt = :now, checkedInBy = :actor "
+                    f"{notes_expr}{lost_expr}REMOVE gsi1pk, gsi1sk"
+                ),
+                "ConditionExpression": "#status = :open",
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": serialize_item(values),
+            }
+        }
+    ]
+    if checkout.get("unitId"):
+        items.append(
             {
                 "Update": {
                     "TableName": table_name(),
                     "Key": serialize_item(
-                        {"PK": keys.pk(checkout["orgId"]), "SK": keys.sk_checkout(checkout["checkoutId"])}
+                        {
+                            "PK": keys.pk(checkout["orgId"]),
+                            "SK": keys.sk_unit(checkout["assetId"], checkout["unitId"]),
+                        }
                     ),
-                    "UpdateExpression": (
-                        f"SET #status = :status, returnedAt = :now, checkedInBy = :actor "
-                        f"{notes_expr}{lost_expr}REMOVE gsi1pk, gsi1sk"
-                    ),
-                    "ConditionExpression": "#status = :open",
-                    "ExpressionAttributeNames": {"#status": "status"},
-                    "ExpressionAttributeValues": serialize_item(values),
+                    **unit_update,
                 }
-            },
+            }
+        )
+    items.extend(
+        [
             {
                 "Update": {
                     "TableName": table_name(),
@@ -216,6 +300,7 @@ def close_checkout(checkout: dict, options: dict) -> dict:
             },
         ]
     )
+    client().transact_write_items(TransactItems=items)
     result = {**checkout, "status": options["outcome"], "returnedAt": now, "checkedInBy": options["actor"]}
     if options["outcome"] == "lost":
         result["markedLostAt"] = now
@@ -278,6 +363,10 @@ def renew_checkout(checkout: dict, org: dict, actor: str, now=None) -> dict:
 
 def list_open_loans_for_asset(org_id: str, asset_id: str) -> list:
     return [loan for loan in list_open_loans(org_id) if loan.get("assetId") == asset_id]
+
+
+def list_open_loans_for_unit(org_id: str, unit_id: str) -> list:
+    return [loan for loan in list_open_loans(org_id) if loan.get("unitId") == unit_id]
 
 
 def list_open_loans(org_id: str, due_before: str | None = None) -> list:

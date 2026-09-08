@@ -18,9 +18,14 @@ def sk_checkout(checkout_id: str) -> str:
     return f"CHECKOUT#{checkout_id}"
 
 
+def sk_unit(asset_id: str, unit_id: str) -> str:
+    return f"UNIT#{asset_id}#{unit_id}"
+
+
 PREFIX_MEMBER = "MEMBER#"
 PREFIX_ASSET = "ASSET#"
 PREFIX_CHECKOUT = "CHECKOUT#"
+PREFIX_UNIT = "UNIT#"
 
 GSI1 = "gsi1"
 GSI2 = "gsi2"
@@ -47,3 +52,7 @@ def asset_code_lookup_pk(org_id: str, code: str) -> str:
 
 def member_history_pk(org_id: str, member_id: str) -> str:
     return f"ORG#{org_id}#MEMBER#{member_id}"
+
+
+def unit_serial_lookup_pk(org_id: str, serial: str) -> str:
+    return f"ORG#{org_id}#UNIT#{serial.upper()}"

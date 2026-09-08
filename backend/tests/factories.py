@@ -47,6 +47,22 @@ def make_asset(**overrides):
     }
 
 
+def make_unit(**overrides):
+    return {
+        "orgId": "org-test",
+        "assetId": "ast-1",
+        "assetCode": "BK-ABC123",
+        "assetTitle": "Sapiens",
+        "unitId": "unt-1",
+        "serial": "BK-ABC123-001",
+        "status": "available",
+        "condition": "good",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z",
+        **overrides,
+    }
+
+
 def make_checkout(**overrides):
     return {
         "orgId": "org-test",

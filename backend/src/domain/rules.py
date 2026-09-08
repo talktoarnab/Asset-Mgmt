@@ -4,7 +4,7 @@ from domain.types import borrow_limit_for, stock_levels
 from lib.time import calendar_days_between, end_of_day_after
 
 
-def evaluate_eligibility(org, member, asset, now: datetime):
+def evaluate_eligibility(org, member, asset, now: datetime, unit=None):
     blockers = []
     if member.get("status") == "suspended":
         blockers.append({"code": "MEMBER_SUSPENDED", "message": f"{member['name']}'s membership is suspended."})
@@ -33,14 +33,25 @@ def evaluate_eligibility(org, member, asset, now: datetime):
             }
         )
     else:
-        _stock, available = stock_levels(asset)
-        if available < 1:
-            blockers.append(
-                {
-                    "code": "ASSET_UNAVAILABLE",
-                    "message": f'"{asset["title"]}" is out of stock.',
-                }
-            )
+        if unit is not None:
+            status = unit.get("status")
+            serial = unit.get("serial") or "This unit"
+            if status != "available":
+                blockers.append(
+                    {
+                        "code": "ASSET_UNAVAILABLE",
+                        "message": f"{serial} is {str(status or 'unavailable').replace('_', ' ')}.",
+                    }
+                )
+        else:
+            _stock, available = stock_levels(asset)
+            if available < 1:
+                blockers.append(
+                    {
+                        "code": "ASSET_UNAVAILABLE",
+                        "message": f'"{asset["title"]}" is out of stock.',
+                    }
+                )
     _ = org
     return blockers
 

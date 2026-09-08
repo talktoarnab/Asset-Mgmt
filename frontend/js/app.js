@@ -9,6 +9,8 @@ import {
   stockBadge,
   stockOf,
   titleCase,
+  unitBadge,
+  loanCode,
 } from './format.js';
 import {
   avatar,
@@ -201,7 +203,7 @@ function loanRows(loans, { showMember = true, showItem = true } = {}) {
       return `<tr>
         ${
           showItem
-            ? `<td><div class="col"><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="mono muted">${esc(loan.assetCode)}</span></div></td>`
+            ? `<td><div class="col"><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="mono muted">${esc(loanCode(loan))}</span></div></td>`
             : ''
         }
         ${
@@ -212,7 +214,7 @@ function loanRows(loans, { showMember = true, showItem = true } = {}) {
         <td><div class="col">${badge(due.text, due.tone, true)}<span class="tiny muted">${esc(formatDate(loan.dueAt, tz()))}</span></div></td>
         <td class="hide-sm small muted">${esc(formatDate(loan.checkedOutAt, tz()))}${loan.renewals > 0 ? ` · renewed ${loan.renewals}×` : ''}</td>
         <td class="right"><div class="btn-group" style="justify-content:flex-end">
-          ${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-loan="checkin" data-id="${esc(loan.checkoutId)}" data-title="${esc(loan.assetTitle)}"` })}
+          ${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-loan="checkin" data-id="${esc(loan.checkoutId)}" data-title="${esc(loan.assetTitle)}" data-serial="${esc(loan.unitSerial || '')}"` })}
           ${btn('Renew', { size: 'sm', extra: `data-loan="renew" data-id="${esc(loan.checkoutId)}"` })}
           ${isAdmin() && due.overdue ? btn('Lost', { variant: 'ghost', size: 'sm', extra: `data-loan="lost" data-id="${esc(loan.checkoutId)}" data-title="${esc(loan.assetTitle)}" data-member="${esc(loan.memberName)}"` }) : ''}
         </div></td>
@@ -229,7 +231,7 @@ async function handleLoanAction(event, onChanged) {
   try {
     if (action === 'checkin') {
       await api.checkin(id);
-      toast(`"${el.dataset.title}" is back on the shelf.`, 'success');
+        toast(`"${el.dataset.title}${el.dataset.serial ? ` (${el.dataset.serial})` : ''}" is back on the shelf.`, 'success');
     } else if (action === 'renew') {
       const renewed = await api.renew(id);
       toast(`Renewed until ${formatDate(renewed.dueAt, tz())}.`, 'success');
@@ -268,12 +270,12 @@ function assetFormBody(draft, editing, errors = {}) {
     ${field('Title', `<input name="title" value="${esc(draft.title)}" placeholder="e.g. Sapiens, or Bosch Impact Drill" required>`, { span: true, error: errors.title })}
     ${field('Category', select('category', draft.category, CATEGORIES))}
     ${field('Author / maker', `<input name="creator" value="${esc(draft.creator)}">`, { error: errors.creator })}
-    ${field('ISBN / serial number', `<input name="identifier" value="${esc(draft.identifier)}">`, { error: errors.identifier })}
+    ${field('ISBN / product serial', `<input name="identifier" value="${esc(draft.identifier)}">`, { hint: 'ISBN or manufacturer serial for the product — not the warehouse unit ID', error: errors.identifier })}
     ${field('Shelf or location', `<input name="location" value="${esc(draft.location)}" placeholder="A2, Tool wall, Locker 1">`, { error: errors.location })}
     ${field('Replacement cost', `<input name="replacementCost" type="number" min="0" value="${esc(draft.replacementCost)}">`, { hint: 'Used for shrinkage reporting', error: errors.replacementCost })}
     ${editing ? field('Status', select('status', draft.status, ASSET_STATUSES)) : ''}
-    ${field('SKU / item ID', `<input name="code" value="${esc(draft.code)}" placeholder="BK-4F2A9C">`, { hint: editing ? 'Changing this invalidates printed labels' : 'Leave blank to generate one', error: errors.code })}
-    ${field('Stock quantity', `<input name="stock" type="number" min="1" value="${esc(draft.stock || '1')}">`, { hint: 'How many units you own. Checkout takes one unit from the shelf.', error: errors.stock })}
+    ${field('SKU', `<input name="code" value="${esc(draft.code)}" placeholder="BK-4F2A9C">`, { hint: editing ? 'Product code. Unit labels stay as they were printed.' : 'Leave blank to generate one. Each copy then gets SKU-001, SKU-002, …', error: errors.code })}
+    ${field('How many units', `<input name="stock" type="number" min="1" max="200" value="${esc(draft.stock || '1')}">`, { hint: editing ? 'Adds or removes identified units. Cannot go below copies currently on loan.' : 'Each physical copy gets its own serial, like a warehouse.', error: errors.stock })}
   </form>`;
 }
 
@@ -440,7 +442,7 @@ async function renderDashboard(view) {
                 .slice(0, 6)
                 .map((loan) => {
                   const due = dueLabel(loan.dueAt, tz());
-                  return `<div class="row-between" style="padding:9px 0;border-bottom:1px solid var(--line)"><div class="col grow"><a class="small strong truncate" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="tiny muted truncate">${esc(loan.memberName)} · ${esc(formatDate(loan.dueAt, tz()))}</span></div>${badge(due.text, due.tone)}</div>`;
+                  return `<div class="row-between" style="padding:9px 0;border-bottom:1px solid var(--line)"><div class="col grow"><a class="small strong truncate" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="tiny muted truncate">${esc(loan.memberName)}${loan.unitSerial ? ` · ${esc(loan.unitSerial)}` : ''} · ${esc(formatDate(loan.dueAt, tz()))}</span></div>${badge(due.text, due.tone)}</div>`;
                 })
                 .join('')}</div>`
             : emptyState({ title: 'Nothing due imminently', description: 'These loans are due within two days.' }),
@@ -468,6 +470,27 @@ async function renderDashboard(view) {
   });
 }
 
+function unitPickerHtml(result, selectedUnitId) {
+  if (result.unit) return '';
+  const units = (result.asset?.units ?? []).filter((unit) => unit.status === 'available');
+  if (!units.length) return '';
+  if (units.length === 1 && selectedUnitId === units[0].unitId) {
+    return card(
+      `<div class="picked">${badge('On the shelf', 'positive', true)}<div class="col grow"><span class="small strong mono">${esc(units[0].serial)}</span><span class="tiny muted">This is the copy that will go out</span></div></div>`,
+      { title: 'Unit' },
+    );
+  }
+  return card(
+    `<div class="member-list">${units
+      .map(
+        (unit) =>
+          `<button class="member-option ${selectedUnitId === unit.unitId ? 'selected' : ''}" type="button" data-act="pick-unit" data-id="${esc(unit.unitId)}"><div class="col grow"><span class="small strong mono">${esc(unit.serial)}</span><span class="tiny muted">${esc(titleCase(unit.condition || 'good'))}</span></div>${selectedUnitId === unit.unitId ? badge('Selected', 'positive', true) : ''}</button>`,
+      )
+      .join('')}</div>`,
+    { title: 'Which copy?' },
+  );
+}
+
 async function renderScan(view) {
   const members = await api.listMembers().then((r) => r.items).catch((error) => {
     toastFail(error);
@@ -476,6 +499,7 @@ async function renderScan(view) {
   let result;
   let memberId;
   let memberQuery = '';
+  let selectedUnitId;
 
   function loanOptions() {
     const days = [...new Set([1, 3, 7, 14, 21, 30, org().defaultLoanDays])].sort((a, b) => a - b);
@@ -501,6 +525,11 @@ async function renderScan(view) {
     if (!ref.trim()) return;
     try {
       result = await api.scan(ref.trim(), withMember);
+      if (result.unit?.unitId) selectedUnitId = result.unit.unitId;
+      else if (!selectedUnitId) {
+        const available = (result.asset?.units ?? []).filter((unit) => unit.status === 'available');
+        if (available.length === 1) selectedUnitId = available[0].unitId;
+      }
       if (result.suggestedAction === 'checkin' && !(stockOf(result.asset).available > 0)) memberId = undefined;
       paint();
     } catch (error) {
@@ -512,10 +541,12 @@ async function renderScan(view) {
 
   function paint() {
     const selected = members.find((m) => m.memberId === memberId);
+    const availableUnits = (result?.asset?.units ?? []).filter((unit) => unit.status === 'available');
+    const unitReady = Boolean(result?.unit || selectedUnitId || availableUnits.length <= 1);
     view.innerHTML = `
       ${pageHead('Desk', 'Scan with a handheld reader, or type the code printed on the label, then lend or return.', result ? btn('Start over', { iconName: 'close', extra: 'data-act="reset"' }) : '')}
       <div class="scan-layout">
-        ${card(`<form id="scan-form"><div class="field"><label for="manual-code">Scan or type a SKU</label><div class="row"><input id="manual-code" class="grow scanner-wedge" name="ref" placeholder="Ready for handheld scanner" autocomplete="off" spellcheck="false" value="${esc(result?.asset?.code ?? '')}"><button class="btn" type="submit">Find</button></div><p class="tiny muted" style="margin-top:8px">Handheld scanners send the barcode and Enter. Camera scanning can be added later on this same screen.</p></div></form>`)}
+        ${card(`<form id="scan-form"><div class="field"><label for="manual-code">Scan or type a unit serial</label><div class="row"><input id="manual-code" class="grow scanner-wedge" name="ref" placeholder="Ready for handheld scanner" autocomplete="off" spellcheck="false" value="${esc(result?.unit?.serial ?? result?.asset?.code ?? '')}"><button class="btn" type="submit">Find</button></div><p class="tiny muted" style="margin-top:8px">Each copy has its own ID (SKU-001, SKU-002, …). Scanning a SKU lists the units on the shelf.</p></div></form>`)}
         <div class="stack" id="scan-result">
           ${
             !result
@@ -524,16 +555,18 @@ async function renderScan(view) {
                   <div class="row-between" style="margin-top:12px;align-items:flex-start">
                     <div class="col grow"><a href="#/assets/${esc(result.asset.assetId)}"><h2>${esc(result.asset.title)}</h2></a>
                     <span class="small muted">${[result.asset.creator, titleCase(result.asset.category), result.asset.location].filter(Boolean).map(esc).join(' · ')}</span>
-                    <span class="mono muted" style="margin-top:4px">${esc(result.asset.sku || result.asset.code)}</span></div>
+                    <span class="mono muted" style="margin-top:4px">${esc(result.unit?.serial || result.asset.sku || result.asset.code)}</span>
+                    ${result.unit ? `<span class="tiny muted">${esc(unitBadge(result.unit).text)} · SKU ${esc(result.asset.sku || result.asset.code)}</span>` : ''}</div>
                     ${badge(stockBadge(result.asset).text, stockBadge(result.asset).tone, true)}
                   </div>`)}
+                ${unitPickerHtml(result, selectedUnitId)}
                 ${
                   (result.openCheckouts ?? (result.activeCheckout ? [result.activeCheckout] : []))
                     .length
                     ? card(
                         `${(result.openCheckouts ?? [result.activeCheckout]).map((loan) => {
                           const due = dueLabel(loan.dueAt, tz());
-                          return `<div class="picked" style="margin-bottom:10px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(formatPhone(loan.memberPhone))} · taken ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(due.text, due.tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`;
+                          return `<div class="picked" style="margin-bottom:10px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(formatPhone(loan.memberPhone))} · ${esc(loan.unitSerial || loan.assetCode)} · taken ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(due.text, due.tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`;
                         }).join('')}
                          ${!(stockOf(result.asset).available > 0) ? btn('Check the oldest loan back in', { variant: 'ghost', size: 'sm', block: true, extra: 'data-act="checkin"' }) : ''}`,
                         { title: `${(result.openCheckouts ?? [result.activeCheckout]).length} on loan` },
@@ -541,7 +574,7 @@ async function renderScan(view) {
                     : ''
                 }
                 ${
-                  stockOf(result.asset).available > 0
+                  stockOf(result.asset).available > 0 && (!result.unit || result.unit.status === 'available')
                     ? card(`<div class="step ${memberId ? 'done' : ''}"><span class="n">${memberId ? icon('check', 12) : '2'}</span>Who is borrowing?</div>
                         ${
                           selected
@@ -561,7 +594,7 @@ async function renderScan(view) {
                         ${result.blockers.length ? `<div class="stack" style="gap:8px;margin-top:14px">${result.blockers.map((b) => notice(b.message, 'danger')).join('')}</div>` : ''}
                         ${
                           memberId
-                            ? `<div style="margin-top:14px" class="stack">${field('Loan period', select('loanDays', String(org().defaultLoanDays), loanOptions()))}${btn(`Check out to ${esc(selected?.name.split(' ')[0] ?? '')}`, { variant: 'primary', size: 'lg', block: true, extra: `data-act="checkout" ${result.blockers.length ? 'disabled' : ''}` })}</div>`
+                            ? `<div style="margin-top:14px" class="stack">${!unitReady ? notice('Pick which copy is leaving the shelf.') : ''}${field('Loan period', select('loanDays', String(org().defaultLoanDays), loanOptions()))}${btn(`Check out to ${esc(selected?.name.split(' ')[0] ?? '')}`, { variant: 'primary', size: 'lg', block: true, extra: `data-act="checkout" ${result.blockers.length || !unitReady ? 'disabled' : ''}` })}</div>`
                             : ''
                         }`)
                     : ''
@@ -594,20 +627,25 @@ async function renderScan(view) {
       result = undefined;
       memberId = undefined;
       memberQuery = '';
+      selectedUnitId = undefined;
+      paint();
+    } else if (act === 'pick-unit') {
+      selectedUnitId = el.dataset.id;
       paint();
     } else if (act === 'pick-member') {
       memberId = el.dataset.id;
-      await lookup(result.asset.assetId, memberId);
+      await lookup(result.unit?.serial || result.asset.assetId, memberId);
     } else if (act === 'clear-member') {
       memberId = undefined;
       paint();
     } else if (act === 'checkin') {
       try {
         if (el.dataset.id) await api.checkin(el.dataset.id);
-        else await api.checkinByRef(result.asset.assetId);
-        toast(`"${result.asset.title}" checked in. Thanks!`, 'success');
+        else await api.checkinByRef(result.unit?.serial || result.asset.assetId);
+        toast(`"${result.unit?.serial || result.asset.title}" checked in. Thanks!`, 'success');
         result = undefined;
         memberId = undefined;
+        selectedUnitId = undefined;
         refreshCounts();
         paint();
       } catch (error) {
@@ -617,19 +655,22 @@ async function renderScan(view) {
       const days = Number(view.querySelector('[name="loanDays"]')?.value) || undefined;
       try {
         const response = await api.checkout({
-          assetRef: result.asset.assetId,
+          assetRef: result.unit?.serial || result.asset.assetId,
+          unitId: selectedUnitId || result.unit?.unitId,
           memberId,
           loanDays: days,
         });
-        toast(`${response.asset.title} → ${response.member.name}, due ${formatDate(response.checkout.dueAt, tz())}.`, 'success');
+        const serial = response.checkout.unitSerial || response.asset.title;
+        toast(`${serial} → ${response.member.name}, due ${formatDate(response.checkout.dueAt, tz())}.`, 'success');
         result = undefined;
         memberId = undefined;
         memberQuery = '';
+        selectedUnitId = undefined;
         refreshCounts();
         paint();
       } catch (error) {
         toastFail(error);
-        lookup(result.asset.assetId, memberId);
+        lookup(result.unit?.serial || result.asset.assetId, memberId);
       }
     }
   }
@@ -659,7 +700,8 @@ async function renderLoans(view) {
       !term ||
       loan.assetTitle.toLowerCase().includes(term) ||
       loan.memberName.toLowerCase().includes(term) ||
-      loan.assetCode.toLowerCase().includes(term);
+      loan.assetCode.toLowerCase().includes(term) ||
+      (loan.unitSerial || '').toLowerCase().includes(term);
     const openLoans = open.filter(matches);
     const overdueLoans = openLoans.filter((loan) => dueLabel(loan.dueAt, tz()).overdue);
     const closed = history.filter((loan) => loan.status !== 'open').filter(matches);
@@ -673,7 +715,7 @@ async function renderLoans(view) {
             <button type="button" class="${tab === 'open' ? 'active' : ''}" data-tab="open">On loan (${openLoans.length})</button>
             <button type="button" class="${tab === 'history' ? 'active' : ''}" data-tab="history">Returned</button>
           </div>
-          ${searchInput(query, 'Filter by item or borrower')}
+          ${searchInput(query, 'Filter by item, unit ID or borrower')}
         </div>
         ${card(
           tab === 'history'
@@ -681,7 +723,7 @@ async function renderLoans(view) {
               ? `<div class="table-wrap"><table><thead><tr><th>Item</th><th>Borrower</th><th>Taken</th><th>Returned</th><th>Outcome</th></tr></thead><tbody>${closed
                   .map(
                     (loan) =>
-                      `<tr><td><div class="col"><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="mono muted">${esc(loan.assetCode)}</span></div></td><td><a href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a></td><td class="small muted">${esc(formatDate(loan.checkedOutAt, tz()))}</td><td class="small muted">${esc(formatDate(loan.returnedAt, tz()))}</td><td>${badge(titleCase(loan.status), loan.status === 'returned' ? 'positive' : 'danger', true)}</td></tr>`,
+                      `<tr><td><div class="col"><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="mono muted">${esc(loanCode(loan))}</span></div></td><td><a href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a></td><td class="small muted">${esc(formatDate(loan.checkedOutAt, tz()))}</td><td class="small muted">${esc(formatDate(loan.returnedAt, tz()))}</td><td>${badge(titleCase(loan.status), loan.status === 'returned' ? 'positive' : 'danger', true)}</td></tr>`,
                   )
                   .join('')}</tbody></table></div>`
               : emptyState({ title: 'Nothing here', description: 'No completed loans yet.' })
@@ -796,7 +838,7 @@ async function renderAssets(view) {
           editing: false,
           onSubmit: async (payload) => {
             const asset = await api.createAsset(payload);
-            toast(`"${asset.title}" added (${asset.sku || asset.code}, stock ${asset.stock}).`, 'success');
+            toast(`"${asset.title}" added (${asset.sku || asset.code}, ${asset.stock} unit${asset.stock === 1 ? '' : 's'}).`, 'success');
             paint();
           },
         });
@@ -827,7 +869,7 @@ function openBulkAdd(onDone) {
       .filter((row) => row.title);
   const updateCount = () => {
     const n = parse().length;
-    bodyEl.querySelector('[data-count]').textContent = n ? `${n} SKU${n === 1 ? '' : 's'} ready. Each gets a generated SKU and stock of 1.` : '';
+    bodyEl.querySelector('[data-count]').textContent = n ? `${n} SKU${n === 1 ? '' : 's'} ready. Each gets a generated SKU and one identified unit.` : '';
   };
   bodyEl.addEventListener('input', updateCount);
   overlay.addEventListener('click', async (event) => {
@@ -858,7 +900,25 @@ async function renderAssetDetail(view, assetId) {
   const { asset, activeCheckout, openCheckouts = activeCheckout ? [activeCheckout] : [] } = data;
   const stock = stockBadge(asset);
   const levels = stockOf(asset);
-  const qr = await qrImg(asset.code || asset.assetId, 200, `QR label for ${asset.title}`);
+  const units = asset.units ?? [];
+  const sample = units.find((unit) => unit.status !== 'retired') ?? units[0];
+  const qr = await qrImg(sample?.serial || asset.code || asset.assetId, 200, `QR label for ${sample?.serial || asset.title}`);
+  const loansByUnit = Object.fromEntries(openCheckouts.filter((loan) => loan.unitId).map((loan) => [loan.unitId, loan]));
+  const unitsTable = units.length
+    ? `<div class="table-wrap"><table><thead><tr><th>Unit ID</th><th>Status</th><th class="hide-sm">Loan</th><th class="right"> </th></tr></thead><tbody>${units
+        .map((unit) => {
+          const st = unitBadge(unit);
+          const loan = loansByUnit[unit.unitId];
+          const canRemove = unit.status !== 'checked_out';
+          return `<tr>
+            <td><span class="mono strong">${esc(unit.serial)}</span></td>
+            <td>${badge(st.text, st.tone, true)}</td>
+            <td class="hide-sm small">${loan ? `<a href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a>` : unit.borrowerName ? esc(unit.borrowerName) : '—'}</td>
+            <td class="right">${canRemove ? btn('Remove', { variant: 'ghost', size: 'sm', extra: `data-act="remove-unit" data-id="${esc(unit.unitId)}" data-serial="${esc(unit.serial)}"` }) : ''}</td>
+          </tr>`;
+        })
+        .join('')}</tbody></table></div>`
+    : `<p class="small muted">No identified units yet. Add copies so each one can be tracked.</p>`;
   view.innerHTML = `
     <div class="stack">
       <div class="page-head">
@@ -873,7 +933,7 @@ async function renderAssetDetail(view, assetId) {
           ${card(`<div class="row-between">${badge(stock.text, stock.tone, true)}<span class="small muted">Borrowed ${asset.timesBorrowed} time${asset.timesBorrowed === 1 ? '' : 's'}</span></div>
             ${
               openCheckouts.length
-                ? openCheckouts.map((loan) => `<div class="picked" style="margin-top:14px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(formatPhone(loan.memberPhone))} · since ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(dueLabel(loan.dueAt, tz()).text, dueLabel(loan.dueAt, tz()).tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`).join('')
+                ? openCheckouts.map((loan) => `<div class="picked" style="margin-top:14px">${avatar(loan.memberName)}<div class="col grow"><a class="small strong" href="#/members/${esc(loan.memberId)}">${esc(loan.memberName)}</a><span class="tiny muted">${esc(loan.unitSerial || loan.assetCode)} · since ${esc(formatDate(loan.checkedOutAt, tz()))}</span></div>${badge(dueLabel(loan.dueAt, tz()).text, dueLabel(loan.dueAt, tz()).tone, true)}${btn('Check in', { variant: 'primary', size: 'sm', extra: `data-act="checkin" data-id="${esc(loan.checkoutId)}"` })}</div>`).join('')
                 : ''
             }
             ${
@@ -882,19 +942,62 @@ async function renderAssetDetail(view, assetId) {
                 : ''
             }`, { title: 'Stock' })}
           ${card(
+            `${unitsTable}`,
+            {
+              title: 'Units on the floor',
+              actions: btn('Add units', { size: 'sm', iconName: 'plus', extra: 'data-act="add-units"' }),
+            },
+          )}
+          ${card(
             `<div class="stack" style="gap:10px">
-              ${[['SKU', `<span class="mono">${esc(asset.sku || asset.code)}</span>`], ['Stock owned', String(levels.stock)], ['On the shelf', String(levels.available)], ['On loan', String(levels.onLoan)], ['Category', titleCase(asset.category)], ['Author / maker', asset.creator ?? '—'], ['ISBN / serial', asset.identifier ?? '—'], ['Shelf', asset.location ?? '—'], ['Condition', titleCase(asset.condition ?? 'good')], ['Replacement cost', currency(asset.replacementCost)], ['Added', formatDate(asset.createdAt, tz())]]
+              ${[['SKU', `<span class="mono">${esc(asset.sku || asset.code)}</span>`], ['Units owned', String(levels.stock)], ['On the shelf', String(levels.available)], ['On loan', String(levels.onLoan)], ['Category', titleCase(asset.category)], ['Author / maker', asset.creator ?? '—'], ['ISBN / product serial', asset.identifier ?? '—'], ['Shelf', asset.location ?? '—'], ['Condition', titleCase(asset.condition ?? 'good')], ['Replacement cost', currency(asset.replacementCost)], ['Added', formatDate(asset.createdAt, tz())]]
                 .map(([label, value]) => `<div class="row-between small"><span class="muted">${esc(label)}</span><span class="strong">${typeof value === 'string' && value.startsWith('<') ? value : esc(value)}</span></div>`)
                 .join('')}
             </div>`,
             { title: 'Details' },
           )}
         </div>
-        ${card(`<div class="col center" style="align-items:center;gap:12px">${qr}<div class="center"><div class="strong small">${esc(asset.title)}</div><div class="mono muted">${esc(asset.sku || asset.code)}</div></div><p class="tiny muted center" style="max-width:260px">Stick this SKU on the item. A handheld scanner reads the QR (or the code underneath) into the desk screen.</p></div>`, { title: 'Label', actions: btn('Print sheet', { size: 'sm', iconName: 'print', href: '#/assets/labels' }) })}
+        ${card(`<div class="col center" style="align-items:center;gap:12px">${qr}<div class="center"><div class="strong small">${esc(asset.title)}</div><div class="mono muted">${esc(sample?.serial || asset.sku || asset.code)}</div></div><p class="tiny muted center" style="max-width:260px">Each copy has its own label. Print a sheet so every unit on the floor can be scanned in and out.</p></div>`, { title: 'Unit label', actions: btn('Print sheet', { size: 'sm', iconName: 'print', href: '#/assets/labels' }) })}
       </div>
     </div>`;
   on(view,'click', async (event) => {
     if (event.target.closest('[data-act="lend"]')) go('/scan');
+    if (event.target.closest('[data-act="add-units"]')) {
+      const { overlay, close, bodyEl } = openModal({
+        title: 'Add units',
+        body: `<form id="add-units-form" class="stack">${field('How many copies', `<input name="count" type="number" min="1" max="50" value="1" required>`, { hint: 'Each new copy gets the next serial (SKU-001, SKU-002, …)' })}</form>`,
+        footer: `${btn('Cancel', { extra: 'data-close' })}${btn('Add units', { variant: 'primary', extra: 'data-save' })}`,
+      });
+      overlay.addEventListener('click', async (click) => {
+        if (!click.target.closest('[data-save]')) return;
+        const count = Number(new FormData(bodyEl.querySelector('form')).get('count'));
+        try {
+          await api.addUnits(asset.assetId, { count });
+          toast(`Added ${count} unit${count === 1 ? '' : 's'}.`, 'success');
+          close();
+          renderAssetDetail(view, assetId);
+        } catch (error) {
+          toastFail(error);
+        }
+      });
+    }
+    if (event.target.closest('[data-act="remove-unit"]')) {
+      const el = event.target.closest('[data-act="remove-unit"]');
+      const ok = await confirmDialog({
+        title: 'Remove this unit?',
+        message: `<strong>${esc(el.dataset.serial)}</strong> will leave the floor count. Past loans stay in history.`,
+        confirmLabel: 'Remove unit',
+        destructive: true,
+      });
+      if (!ok) return;
+      try {
+        await api.deleteUnit(asset.assetId, el.dataset.id);
+        toast(`${el.dataset.serial} removed.`, 'success');
+        renderAssetDetail(view, assetId);
+      } catch (error) {
+        toastFail(error);
+      }
+    }
     if (event.target.closest('[data-act="edit"]')) {
       openAssetForm({
         title: 'Edit item',
@@ -1047,7 +1150,7 @@ async function renderMemberDetail(view, memberId) {
           : `<div class="table-wrap"><table><thead><tr><th>Item</th><th>Taken</th><th>Returned</th><th>Outcome</th></tr></thead><tbody>${past
               .map(
                 (loan) =>
-                  `<tr><td><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a></td><td class="small muted">${esc(formatDate(loan.checkedOutAt, tz()))}</td><td class="small muted">${esc(formatDate(loan.returnedAt, tz()))}</td><td>${badge(titleCase(loan.status), loan.status === 'returned' ? 'positive' : 'danger', true)}</td></tr>`,
+                  `<tr><td><div class="col"><a class="strong" href="#/assets/${esc(loan.assetId)}">${esc(loan.assetTitle)}</a><span class="mono muted">${esc(loanCode(loan))}</span></div></td><td class="small muted">${esc(formatDate(loan.checkedOutAt, tz()))}</td><td class="small muted">${esc(formatDate(loan.returnedAt, tz()))}</td><td>${badge(titleCase(loan.status), loan.status === 'returned' ? 'positive' : 'danger', true)}</td></tr>`,
               )
               .join('')}</tbody></table></div>`,
         { title: 'History', bodyClass: '' },
@@ -1109,7 +1212,7 @@ async function renderLabels(view) {
     view.innerHTML = pageHead('Print QR labels', 'Loading…', '') + skeleton();
     let items = [];
     try {
-      items = await api.listAssets({ q: query || undefined }).then((r) => r.items);
+      items = await api.listAssets({ q: query || undefined, include: 'units' }).then((r) => r.items);
     } catch (error) {
       view.innerHTML = notice(error.message, 'danger');
       return;
@@ -1117,18 +1220,23 @@ async function renderLabels(view) {
     const categories = [...new Set(items.map((a) => a.category))].sort();
     const shown = items.filter((asset) => !category || asset.category === category);
     const chosen = shown.filter((asset) => selected.has(asset.assetId));
-    const qrs = await Promise.all(chosen.map((asset) => qrImg(asset.code || asset.assetId, 150, `QR label for ${asset.title}`)));
+    const labels = chosen.flatMap((asset) => {
+      const units = (asset.units || []).filter((unit) => unit.status !== 'retired');
+      if (!units.length) return [{ title: asset.title, serial: asset.sku || asset.code }];
+      return units.map((unit) => ({ title: asset.title, serial: unit.serial }));
+    });
+    const qrs = await Promise.all(labels.map((item) => qrImg(item.serial, 150, `QR label for ${item.serial}`)));
     view.innerHTML = `
       <div class="stack">
         <div class="page-head no-print">
           <div class="col"><a href="#/assets" class="small row" style="gap:6px;margin-bottom:6px">${icon('back', 14)} Catalogue</a>
             <h1>Print QR labels</h1>
-            <p class="subtitle">Select the items you are labelling, then print onto plain paper or sticker sheets.</p>
+            <p class="subtitle">Select catalogue items, then print one label per physical unit onto plain paper or sticker sheets.</p>
           </div>
           <div class="btn-group">
             ${btn('Select all', { extra: 'data-act="all"' })}
             ${btn('Clear', { extra: 'data-act="clear"' })}
-            ${btn(`Print ${chosen.length || ''}`, { variant: 'primary', iconName: 'print', extra: `data-act="print" ${chosen.length ? '' : 'disabled'}` })}
+            ${btn(`Print ${labels.length || ''}`, { variant: 'primary', iconName: 'print', extra: `data-act="print" ${labels.length ? '' : 'disabled'}` })}
           </div>
         </div>
         <div class="row wrap no-print">
@@ -1146,17 +1254,17 @@ async function renderLabels(view) {
             : `<div style="padding:12px 18px;display:grid;gap:8px">${shown
                 .map(
                   (asset) =>
-                    `<label class="checkbox"><input type="checkbox" data-id="${esc(asset.assetId)}" ${selected.has(asset.assetId) ? 'checked' : ''}><span>${esc(asset.title)} <span class="mono muted">${esc(asset.code)}</span></span></label>`,
+                    `<label class="checkbox"><input type="checkbox" data-id="${esc(asset.assetId)}" ${selected.has(asset.assetId) ? 'checked' : ''}><span>${esc(asset.title)} <span class="mono muted">${esc(asset.code)}</span> <span class="tiny muted">${(asset.units || []).filter((u) => u.status !== 'retired').length || asset.stock || 1} unit${((asset.units || []).filter((u) => u.status !== 'retired').length || asset.stock || 1) === 1 ? '' : 's'}</span></span></label>`,
                 )
                 .join('')}</div>`,
           { title: `Choose items (${selected.size} selected)`, bodyClass: '', extraClass: 'no-print' },
         ).replace('class="card"', 'class="card no-print"')}
         ${
-          chosen.length
-            ? `<section><h2 class="no-print" style="margin-bottom:12px">Preview</h2><div class="label-sheet" style="grid-template-columns:repeat(${esc(perRow)},1fr)">${chosen
+          labels.length
+            ? `<section><h2 class="no-print" style="margin-bottom:12px">Preview</h2><div class="label-sheet" style="grid-template-columns:repeat(${esc(perRow)},1fr)">${labels
                 .map(
-                  (asset, i) =>
-                    `<div class="label-tag">${qrs[i]}<div class="col"><span class="label-title">${esc(asset.title)}</span><span class="label-code">${esc(asset.sku || asset.code)}</span></div></div>`,
+                  (item, i) =>
+                    `<div class="label-tag">${qrs[i]}<div class="col"><span class="label-title">${esc(item.title)}</span><span class="label-code">${esc(item.serial)}</span></div></div>`,
                 )
                 .join('')}</div></section>`
             : ''
